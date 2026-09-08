@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -14,7 +15,7 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 )
 
-// Manager handles authentication and authorization
+// Manager handles authentication and authorization.
 type Manager struct {
 	jwtSecret      []byte
 	jwtExpiry      time.Duration
@@ -22,28 +23,29 @@ type Manager struct {
 	allowAnonymous bool
 }
 
-// Claims represents JWT claims
+// Claims represents stream-scoped JWT claims.
 type Claims struct {
-	StreamID   string   `json:"stream_id"`
-	Action     string   `json:"action"` // "publish" or "play"
-	APIKey     string   `json:"api_key,omitempty"`
-	IP         string   `json:"ip,omitempty"`
-	Expiration int64    `json:"exp"`
-	IssuedAt   int64    `json:"iat"`
-	ID         string   `json:"jti"`
+	StreamID string `json:"stream_id"`
+	Action   string `json:"action"` // publish or play
+	APIKey   string `json:"api_key,omitempty"`
+	IP       string `json:"ip,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// NewManager creates a new auth manager
 func NewManager(secret string, expiry string, apiKeys []string, allowAnonymous bool) (*Manager, error) {
+	if len(secret) < 32 {
+		return nil, fmt.Errorf("JWT secret must be at least 32 characters")
+	}
 	expiryDuration, err := time.ParseDuration(expiry)
-	if err != nil {
-		expiryDuration = 24 * time.Hour
+	if err != nil || expiryDuration <= 0 {
+		return nil, fmt.Errorf("invalid JWT expiry %q", expiry)
 	}
 
-	keyMap := make(map[string]bool)
+	keyMap := make(map[string]bool, len(apiKeys))
 	for _, key := range apiKeys {
-		keyMap[key] = true
+		if key != "" {
+			keyMap[key] = true
+		}
 	}
 
 	return &Manager{
@@ -54,21 +56,33 @@ func NewManager(secret string, expiry string, apiKeys []string, allowAnonymous b
 	}, nil
 }
 
-// GeneratePublishToken generates a JWT for publishing
 func (m *Manager) GeneratePublishToken(streamID, apiKey, ip string) (string, error) {
+	return m.generateToken(streamID, "publish", apiKey, ip)
+}
+
+func (m *Manager) GeneratePlayToken(streamID, ip string) (string, error) {
+	return m.generateToken(streamID, "play", "", ip)
+}
+
+func (m *Manager) generateToken(streamID, action, apiKey, ip string) (string, error) {
+	if streamID == "" {
+		return "", fmt.Errorf("stream ID is required")
+	}
+	if action != "publish" && action != "play" {
+		return "", fmt.Errorf("unsupported token action %q", action)
+	}
+
 	now := time.Now()
 	claims := Claims{
 		StreamID: streamID,
-		Action:   "publish",
+		Action:   action,
 		APIKey:   apiKey,
 		IP:       ip,
-		Expiration: now.Add(m.jwtExpiry).Unix(),
-		IssuedAt:   now.Unix(),
-		ID:         uuid.New().String(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    "stremdbc",
 			Subject:   streamID,
 			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.jwtExpiry)),
 			ID:        uuid.New().String(),
 		},
@@ -78,77 +92,45 @@ func (m *Manager) GeneratePublishToken(streamID, apiKey, ip string) (string, err
 	return token.SignedString(m.jwtSecret)
 }
 
-// GeneratePlayToken generates a JWT for playback
-func (m *Manager) GeneratePlayToken(streamID, ip string) (string, error) {
-	now := time.Now()
-	claims := Claims{
-		StreamID: streamID,
-		Action:   "play",
-		IP:       ip,
-		Expiration: now.Add(m.jwtExpiry).Unix(),
-		IssuedAt:   now.Unix(),
-		ID:         uuid.New().String(),
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    "stremdbc",
-			Subject:   streamID,
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(m.jwtExpiry)),
-			ID:        uuid.New().String(),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(m.jwtSecret)
-}
-
-// ValidateToken validates a JWT token
 func (m *Manager) ValidateToken(tokenString string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, ErrInvalidToken
+		}
 		return m.jwtSecret, nil
-	})
-
+	}, jwt.WithIssuer("stremdbc"), jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, ErrExpiredToken
+		}
 		return nil, ErrInvalidToken
 	}
-
-	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
+	if !token.Valid || claims.ExpiresAt == nil {
 		return nil, ErrInvalidToken
 	}
-
-	// Check expiration
-	if time.Now().Unix() > claims.Expiration {
-		return nil, ErrExpiredToken
-	}
-
 	return claims, nil
 }
 
-// ValidateAPIKey validates an API key
 func (m *Manager) ValidateAPIKey(key string) bool {
 	if m.allowAnonymous && key == "" {
 		return true
 	}
-	return m.apiKeys[key]
+	return key != "" && m.apiKeys[key]
 }
 
-// CanPublish checks if the claims allow publishing to the stream
+func (m *Manager) AllowAnonymous() bool {
+	return m.allowAnonymous
+}
+
 func (m *Manager) CanPublish(claims *Claims, streamID string) bool {
-	if claims == nil {
-		return false
-	}
-	return claims.Action == "publish" && claims.StreamID == streamID
+	return claims != nil && claims.Action == "publish" && claims.StreamID == streamID
 }
 
-// CanPlay checks if the claims allow playing the stream
 func (m *Manager) CanPlay(claims *Claims, streamID string) bool {
-	if claims == nil {
-		return false
-	}
-	return claims.Action == "play" && (claims.StreamID == streamID || claims.StreamID == "*")
+	return claims != nil && claims.Action == "play" && (claims.StreamID == streamID || claims.StreamID == "*")
 }
 
-// GenerateSignedURL generates a signed playback URL
 func (m *Manager) GenerateSignedURL(baseURL, streamID, ip string) (string, error) {
 	token, err := m.GeneratePlayToken(streamID, ip)
 	if err != nil {
