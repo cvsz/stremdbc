@@ -182,15 +182,23 @@ func (m *Manager) GetStats() map[string]interface{} {
 		w.mu.Unlock()
 	}
 	return map[string]interface{}{
-		"worker_count":     len(m.workers),
-		"active_workers":   activeWorkers,
-		"queue_size":       len(m.jobs),
-		"encoder":          m.encoder,
-		"bytes_processed":  total.BytesProcessed,
-		"frames_encoded":   total.FramesEncoded,
-		"jobs_completed":   total.JobsCompleted,
-		"errors":           total.Errors,
+		"worker_count":    len(m.workers),
+		"active_workers":  activeWorkers,
+		"queue_size":      len(m.jobs),
+		"encoder":         m.encoder,
+		"bytes_processed": total.BytesProcessed,
+		"frames_encoded":  total.FramesEncoded,
+		"jobs_completed":  total.JobsCompleted,
+		"errors":          total.Errors,
 	}
+}
+
+func (m *Manager) GetEncoder() string {
+	return m.encoder
+}
+
+func (m *Manager) processable() bool {
+	return m.ctx.Err() == nil
 }
 
 func (w *Worker) processJobs(ctx context.Context, jobs <-chan *TranscodeJob) {
@@ -214,6 +222,7 @@ func (w *Worker) executeJob(ctx context.Context, job *TranscodeJob) {
 	defer func() {
 		w.mu.Lock()
 		w.running = false
+		w.cmd = nil
 		w.mu.Unlock()
 	}()
 
@@ -279,6 +288,11 @@ func (w *Worker) buildFFmpegArgs(job *TranscodeJob, profile config.ABRProfile) [
 		"-map", "0:v:0", "-map", "0:a?",
 		"-vf", videoFilter,
 		"-c:v", w.encoder,
+	}
+	if w.encoder == "libx264" {
+		args = append(args, "-preset", "fast")
+	}
+	args = append(args,
 		"-b:v", fmt.Sprintf("%d", profile.Bitrate),
 		"-maxrate", fmt.Sprintf("%d", profile.Bitrate),
 		"-bufsize", fmt.Sprintf("%d", profile.Bitrate*2),
@@ -291,13 +305,7 @@ func (w *Worker) buildFFmpegArgs(job *TranscodeJob, profile config.ABRProfile) [
 		"-hls_list_size", "6",
 		"-hls_flags", "delete_segments+independent_segments",
 		output,
-	}
-	if w.encoder == "libx264" {
-		insertAt := len(args) - 12
-		prefix := append([]string(nil), args[:insertAt]...)
-		prefix = append(prefix, "-preset", "fast")
-		args = append(prefix, args[insertAt:]...)
-	}
+	)
 	return args
 }
 
