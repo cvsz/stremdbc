@@ -13,38 +13,39 @@ import (
 	"go.uber.org/zap"
 )
 
-// Server represents an SRT server
+// Server represents an SRT output server
 type Server struct {
-	config   *config.SRTConfig
-	registry *core.StreamRegistry
-	logger   *zap.Logger
-	listener *net.UDPConn
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	running  bool
-	streams  map[string]*StreamConnection
+	config    *config.SRTOutputConfig
+	registry  *core.StreamRegistry
+	logger    *zap.Logger
+	listener  *net.UDPConn
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	running   bool
+	sessions  map[string]*Session
 }
 
-// StreamConnection represents an SRT stream connection
-type StreamConnection struct {
-	StreamID  string
-	Conn      net.Conn
-	State     string
-	CreatedAt time.Time
-	BytesRead int64
+// Session represents an SRT output session
+type Session struct {
+	ID         string
+	StreamID   string
+	Addr       *net.UDPAddr
+	State      string
+	CreatedAt  time.Time
+	BytesSent  int64
 }
 
-// NewServer creates a new SRT server
-func NewServer(cfg *config.SRTConfig, registry *core.StreamRegistry, logger *zap.Logger) *Server {
+// NewServer creates a new SRT output server
+func NewServer(cfg *config.SRTOutputConfig, registry *core.StreamRegistry, logger *zap.Logger) *Server {
 	return &Server{
 		config:   cfg,
 		registry: registry,
-		logger:   logger.Named("srt"),
-		streams:  make(map[string]*StreamConnection),
+		logger:   logger.Named("srt-output"),
+		sessions: make(map[string]*Session),
 	}
 }
 
-// Start starts the SRT server
+// Start starts the SRT output server
 func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	if s.running {
@@ -59,14 +60,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address %s: %w", addr, err)
 	}
-	
+
 	listener, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
 	s.listener = listener
-	s.logger.Info("SRT server started", zap.String("address", addr))
+	s.logger.Info("SRT output server started", zap.String("address", addr))
 
 	s.wg.Add(1)
 	go func() {
@@ -77,7 +78,7 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the SRT server
+// Stop stops the SRT output server
 func (s *Server) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.running {
@@ -87,7 +88,7 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.running = false
 	s.mu.Unlock()
 
-	s.logger.Info("stopping SRT server")
+	s.logger.Info("stopping SRT output server")
 
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
@@ -110,7 +111,7 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 func (s *Server) acceptLoop(ctx context.Context) {
-	buf := make([]byte, 1472) // SRT typical MTU
+	buf := make([]byte, 1472)
 
 	for {
 		select {
@@ -119,7 +120,7 @@ func (s *Server) acceptLoop(ctx context.Context) {
 		default:
 			n, addr, err := s.listener.ReadFromUDP(buf)
 			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
+				if s.isClosedError(err) {
 					return
 				}
 				s.logger.Error("failed to read from UDP", zap.Error(err))
@@ -136,48 +137,37 @@ func (s *Server) acceptLoop(ctx context.Context) {
 }
 
 func (s *Server) handlePacket(ctx context.Context, data []byte, addr *net.UDPAddr) {
-	// Simplified SRT handshake handling
-	// Full SRT protocol implementation would use libsrt
-	
-	if len(data) < 16 {
-		return
-	}
-
-	// Extract stream ID from packet (simplified)
 	streamID := s.extractStreamID(data)
 	if streamID == "" {
 		streamID = fmt.Sprintf("stream_%d", time.Now().UnixNano())
 	}
 
 	s.mu.Lock()
-	if _, exists := s.streams[streamID]; !exists {
-		s.streams[streamID] = &StreamConnection{
-			StreamID:  streamID,
+	if _, exists := s.sessions[streamID]; !exists {
+		s.sessions[streamID] = &Session{
+			ID:        streamID,
+			Addr:      addr,
 			State:     "active",
 			CreatedAt: time.Now(),
-			BytesRead: int64(len(data)),
+			BytesSent: int64(len(data)),
 		}
-		
-		s.logger.Info("new SRT stream",
+		s.logger.Info("new SRT output stream",
 			zap.String("stream_id", streamID),
 			zap.String("remote", addr.String()),
 		)
 	} else {
-		s.streams[streamID].BytesRead += int64(len(data))
+		s.sessions[streamID].BytesSent += int64(len(data))
 	}
 	s.mu.Unlock()
 
-	// Send acknowledgment (simplified)
+	// Send acknowledgment
 	ack := make([]byte, 16)
 	copy(ack, data[:16])
 	_, _ = s.listener.WriteToUDP(ack, addr)
 }
 
 func (s *Server) extractStreamID(data []byte) string {
-	// Extract streamid from SRT handshake packet
-	// This is a simplified implementation
 	if len(data) > 32 {
-		// Look for streamid= in the packet
 		str := string(data)
 		idx := strings.Index(str, "streamid=")
 		if idx >= 0 {
@@ -192,24 +182,31 @@ func (s *Server) extractStreamID(data []byte) string {
 	return ""
 }
 
-// GetStreamCount returns the number of active streams
-func (s *Server) GetStreamCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.streams)
+func (s *Server) isClosedError(err error) bool {
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return false
+	}
+	return true
 }
 
-// GetStream returns a stream by ID
-func (s *Server) GetStream(id string) (*StreamConnection, bool) {
+// GetSessionCount returns the number of active sessions
+func (s *Server) GetSessionCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stream, exists := s.streams[id]
-	return stream, exists
+	return len(s.sessions)
 }
 
-// RemoveStream removes a stream
-func (s *Server) RemoveStream(id string) {
+// GetSession returns a session by ID
+func (s *Server) GetSession(id string) (*Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.streams, id)
+	session, exists := s.sessions[id]
+	return session, exists
+}
+
+// RemoveSession removes a session
+func (s *Server) RemoveSession(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, id)
 }

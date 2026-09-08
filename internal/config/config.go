@@ -176,6 +176,38 @@ type ABRProfile struct {
 	AudioBitrate int `yaml:"audio_bitrate"`
 }
 
+// RTMPOutputConfig holds RTMP output configuration
+type RTMPOutputConfig struct {
+	Enable      bool          `yaml:"enable"`
+	Host        string        `yaml:"host"`
+	Port        int           `yaml:"port"`
+	ReadTimeout time.Duration `yaml:"read_timeout"`
+}
+
+// RTSPOutputConfig holds RTSP output configuration
+type RTSPOutputConfig struct {
+	Enable      bool          `yaml:"enable"`
+	Host        string        `yaml:"host"`
+	Port        int           `yaml:"port"`
+	ReadTimeout time.Duration `yaml:"read_timeout"`
+}
+
+// SRTOutputConfig holds SRT output configuration
+type SRTOutputConfig struct {
+	Enable   bool          `yaml:"enable"`
+	Host     string        `yaml:"host"`
+	Port     int           `yaml:"port"`
+	Latency  time.Duration `yaml:"latency"`
+}
+
+// DVRConfig holds DVR configuration
+type DVRConfig struct {
+	Enable      bool          `yaml:"enable"`
+	Path        string        `yaml:"path"`
+	MaxDuration time.Duration `yaml:"max_duration"`
+	Format      string        `yaml:"format"`
+}
+
 // DefaultConfig returns a configuration with default values
 func DefaultConfig() *Config {
 	return &Config{
