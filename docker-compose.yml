@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  stremdbc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stremdbc
+    ports:
+      - "8080:8080"   # HTTP/API
+      - "1935:1935"   # RTMP
+    volumes:
+      - ./configs:/app/configs:ro
+      - hls_data:/tmp/hls
+      - recordings:/tmp/recordings
+    environment:
+      - TZ=UTC
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - stremdbc-network
+
+  # Optional: Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: stremdbc-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployments/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+    networks:
+      - stremdbc-network
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: stremdbc-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    networks:
+      - stremdbc-network
+    profiles:
+      - monitoring
+
+volumes:
+  hls_data:
+    driver: local
+  recordings:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  stremdbc-network:
+    driver: bridge

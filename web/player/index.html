@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STREMDBC - Stream Player</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .header {
+            background: #1a1a2e;
+            color: white;
+            padding: 20px 30px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .player-wrapper {
+            background: #000;
+            aspect-ratio: 16/9;
+            position: relative;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .controls {
+            padding: 20px 30px;
+            background: #f8fafc;
+        }
+
+        .stream-info {
+            margin-bottom: 20px;
+        }
+
+        .stream-info h2 {
+            font-size: 18px;
+            color: #1e293b;
+            margin-bottom: 5px;
+        }
+
+        .stream-info p {
+            font-size: 14px;
+            color: #64748b;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+
+        .btn-secondary {
+            background: #e2e8f0;
+            color: #475569;
+        }
+
+        .btn-secondary:hover {
+            background: #cbd5e1;
+        }
+
+        .error-message {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            padding: 15px 20px;
+            border-radius: 6px;
+            margin: 20px 30px;
+            display: none;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 18px;
+            display: none;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 STREMDBC Player</h1>
+            <div class="status">
+                <div class="status-dot"></div>
+                <span id="statusText">Live</span>
+            </div>
+        </div>
+
+        <div class="player-wrapper">
+            <video id="videoPlayer" controls autoplay></video>
+            <div class="loading" id="loading">Loading stream...</div>
+        </div>
+
+        <div class="controls">
+            <div class="stream-info">
+                <h2 id="streamTitle">Loading...</h2>
+                <p id="streamDescription">Fetching stream information</p>
+            </div>
+
+            <div class="actions">
+                <a href="#" class="btn btn-primary" id="hlsLink" target="_blank">Open HLS Stream</a>
+                <button class="btn btn-secondary" onclick="location.reload()">Refresh</button>
+            </div>
+
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-value" id="viewersCount">-</div>
+                    <div class="stat-label">Viewers</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="bitrateValue">-</div>
+                    <div class="stat-label">Bitrate</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="stateValue">-</div>
+                    <div class="stat-label">State</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="error-message" id="errorMessage"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+        // Extract stream ID from URL path
+        const pathParts = window.location.pathname.split('/');
+        const streamId = pathParts[pathParts.length - 1] || 'default';
+
+        const API_BASE = '/api/v1';
+        const HLS_URL = `/hls/${streamId}/index.m3u8`;
+
+        const elements = {
+            video: document.getElementById('videoPlayer'),
+            loading: document.getElementById('loading'),
+            error: document.getElementById('errorMessage'),
+            title: document.getElementById('streamTitle'),
+            description: document.getElementById('streamDescription'),
+            hlsLink: document.getElementById('hlsLink'),
+            viewers: document.getElementById('viewersCount'),
+            bitrate: document.getElementById('bitrateValue'),
+            state: document.getElementById('stateValue'),
+            statusText: document.getElementById('statusText')
+        };
+
+        let hls = null;
+        let refreshInterval = null;
+
+        function showError(message) {
+            elements.error.textContent = message;
+            elements.error.style.display = 'block';
+            elements.loading.style.display = 'none';
+        }
+
+        function hideError() {
+            elements.error.style.display = 'none';
+        }
+
+        async function fetchStreamInfo() {
+            try {
+                const response = await fetch(`${API_BASE}/streams/${streamId}`);
+                if (!response.ok) {
+                    throw new Error('Stream not found');
+                }
+
+                const data = await response.json();
+                
+                elements.title.textContent = data.name || streamId;
+                elements.description.textContent = `Stream ID: ${data.id} • Created: ${new Date(data.created_at).toLocaleString()}`;
+                elements.viewers.textContent = data.viewers || 0;
+                elements.bitrate.textContent = data.bitrate ? `${(data.bitrate / 1000000).toFixed(1)} Mbps` : '-';
+                elements.state.textContent = data.state || 'UNKNOWN';
+                
+                if (data.state === 'LIVE') {
+                    elements.statusText.textContent = 'Live';
+                    elements.statusDot?.classList.add('active');
+                } else {
+                    elements.statusText.textContent = data.state;
+                }
+
+                hideError();
+            } catch (err) {
+                console.error('Failed to fetch stream info:', err);
+            }
+        }
+
+        function initPlayer() {
+            elements.loading.style.display = 'block';
+            elements.hlsLink.href = HLS_URL;
+
+            if (Hls.isSupported()) {
+                hls = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: false,
+                    backBufferLength: 90
+                });
+
+                hls.loadSource(HLS_URL);
+                hls.attachMedia(elements.video);
+
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    elements.loading.style.display = 'none';
+                    elements.video.play().catch(err => {
+                        console.log('Autoplay prevented:', err);
+                    });
+                });
+
+                hls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data.fatal) {
+                        elements.loading.style.display = 'none';
+                        showError('Failed to load stream. Please check if the stream is active.');
+                    }
+                });
+            } else if (elements.video.canPlayType('application/vnd.apple.mpegurl')) {
+                // Native HLS support (Safari)
+                elements.video.src = HLS_URL;
+                elements.video.addEventListener('loadedmetadata', () => {
+                    elements.loading.style.display = 'none';
+                    elements.video.play();
+                });
+            } else {
+                elements.loading.style.display = 'none';
+                showError('HLS playback is not supported in this browser.');
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initPlayer();
+            fetchStreamInfo();
+            
+            // Refresh stream info every 5 seconds
+            refreshInterval = setInterval(fetchStreamInfo, 5000);
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            if (hls) {
+                hls.destroy();
+            }
+        });
+    </script>
+</body>
+</html>
