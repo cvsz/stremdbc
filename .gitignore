@@ -1,4 +1,3 @@
-```
 # Go build artifacts
 *.o
 *.a
@@ -6,12 +5,11 @@
 *.dylib
 *.dll
 *.exe
-
-# Go cache and build directories
 *.test
 *.prof
 coverage.out
 cover.out
+/stremdbc
 bin/
 
 # Dependencies
@@ -31,7 +29,7 @@ Thumbs.db
 .env.local
 *.env.*
 
-# IDE specific
+# IDE
 .vscode/
 .idea/
 *.swp
@@ -46,8 +44,9 @@ target/
 coverage/
 htmlcov/
 .coverage
+.coverage*
 
-# Python related (if any mixed projects)
+# Mixed-project caches
 __pycache__/
 *.pyc
 *.pyo
@@ -59,8 +58,6 @@ venv/
 pip-log.txt
 pip-delete-this-directory.txt
 .tox/
-.coverage*
 .nox/
 .pytest_cache/
 .mypy_cache/
-```
