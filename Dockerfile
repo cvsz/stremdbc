@@ -1,49 +1,46 @@
-FROM golang:1.21-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 
-WORKDIR /app
+WORKDIR /src
 
-# Install build dependencies
 RUN apk add --no-cache git ca-certificates
 
-# Copy go mod files
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/stremdbc ./cmd/stremdbc
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o stremdbc ./cmd/stremdbc
-
-# Final stage
-FROM alpine:3.19
+FROM alpine:3.24
 
 WORKDIR /app
 
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata ffmpeg
-
-# Create non-root user
-RUN addgroup -g 1000 stremdbc && \
+RUN apk add --no-cache ca-certificates tzdata ffmpeg wget && \
+    addgroup -g 1000 stremdbc && \
     adduser -D -u 1000 -G stremdbc stremdbc
 
-# Copy binary from builder
-COPY --from=builder /app/stremdbc .
-COPY --from=builder /app/configs ./configs
+COPY --from=builder /out/stremdbc /app/stremdbc
+COPY --from=builder /src/configs /app/configs
+COPY --from=builder /src/web /app/web
 
-# Create directories for HLS and recordings
-RUN mkdir -p /tmp/hls /tmp/recordings && \
-    chown -R stremdbc:stremdbc /tmp/hls /tmp/recordings /app
+RUN mkdir -p /tmp/hls /tmp/llhls /tmp/recordings /tmp/dvr && \
+    chown -R stremdbc:stremdbc /tmp/hls /tmp/llhls /tmp/recordings /tmp/dvr /app
 
-# Switch to non-root user
 USER stremdbc
 
-# Expose ports
-EXPOSE 8080 1935
+EXPOSE 8080/tcp
+EXPOSE 1935/tcp
+EXPOSE 8554/tcp
+EXPOSE 8443/tcp
+EXPOSE 1936/tcp
+EXPOSE 8555/tcp
+EXPOSE 9000/udp
+EXPOSE 9001/udp
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
 
-ENTRYPOINT ["./stremdbc"]
-CMD ["-config", "configs/config.yaml"]
+ENTRYPOINT ["/app/stremdbc"]
+CMD ["-config", "/app/configs/config.yaml"]
