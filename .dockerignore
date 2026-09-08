@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.dockerignore
+*.md
+coverage.out
+coverage.html
+*.test
+*.prof
+stremdbc
+bin
+tmp
+.env
+.env.*

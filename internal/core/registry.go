@@ -2,6 +2,9 @@ package core
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,43 +15,62 @@ import (
 type StreamState string
 
 const (
-	StreamStateIdle     StreamState = "IDLE"
-	StreamStateLive     StreamState = "LIVE"
+	StreamStateIdle      StreamState = "IDLE"
+	StreamStateLive      StreamState = "LIVE"
 	StreamStateRecording StreamState = "RECORDING"
-	StreamStateError    StreamState = "ERROR"
+	StreamStateError     StreamState = "ERROR"
 )
 
 // StreamInfo contains information about a stream
 type StreamInfo struct {
-	ID           string      `json:"id"`
-	Name         string      `json:"name"`
-	State        StreamState `json:"state"`
-	CreatedAt    time.Time   `json:"created_at"`
-	StartedAt    *time.Time  `json:"started_at,omitempty"`
-	Codec        string      `json:"codec,omitempty"`
-	Bitrate      int64       `json:"bitrate,omitempty"`
-	Viewers      int         `json:"viewers"`
-	PublisherIP  string      `json:"publisher_ip,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	ID             string            `json:"id"`
+	Name           string            `json:"name"`
+	State          StreamState       `json:"state"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	Codec          string            `json:"codec,omitempty"`
+	Bitrate        int64             `json:"bitrate,omitempty"`
+	Viewers        int               `json:"viewers"`
+	PublisherIP    string            `json:"publisher_ip,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	LastActivityAt time.Time         `json:"last_activity_at"`
 }
 
 // StreamRegistry manages all active streams
 type StreamRegistry struct {
-	mu      sync.RWMutex
-	streams map[string]*StreamInfo
-	config  *config.Config
+	mu        sync.RWMutex
+	streams   map[string]*StreamInfo
+	streamTTL time.Duration
 }
 
 // NewStreamRegistry creates a new stream registry
 func NewStreamRegistry(cfg *config.Config) *StreamRegistry {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	ttl := 24 * time.Hour
+	if cfg.Server.StreamTTL > 0 {
+		ttl = cfg.Server.StreamTTL
+	}
 	return &StreamRegistry{
-		streams: make(map[string]*StreamInfo),
-		config:  cfg,
+		streams:   make(map[string]*StreamInfo),
+		streamTTL: ttl,
 	}
 }
 
 // Register registers a new stream
 func (r *StreamRegistry) Register(id, name string) (*StreamInfo, error) {
+	if err := ValidateStreamID(id); err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = id
+	}
+	if err := validateStreamName(name); err != nil {
+		return nil, err
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -56,18 +78,19 @@ func (r *StreamRegistry) Register(id, name string) (*StreamInfo, error) {
 		return nil, ErrStreamExists
 	}
 
-	now := time.Now()
+	now := time.Now().UTC()
 	info := &StreamInfo{
-		ID:        id,
-		Name:      name,
-		State:     StreamStateIdle,
-		CreatedAt: now,
-		Viewers:   0,
-		Metadata:  make(map[string]string),
+		ID:             id,
+		Name:           name,
+		State:          StreamStateIdle,
+		CreatedAt:      now,
+		Viewers:        0,
+		Metadata:       make(map[string]string),
+		LastActivityAt: now,
 	}
 
 	r.streams[id] = info
-	return info, nil
+	return cloneStreamInfo(info), nil
 }
 
 // Get retrieves a stream by ID
@@ -80,13 +103,14 @@ func (r *StreamRegistry) Get(id string) (*StreamInfo, bool) {
 		return nil, false
 	}
 
-	// Return a copy to avoid race conditions
-	copy := *info
-	return &copy, true
+	return cloneStreamInfo(info), true
 }
 
 // Update updates stream information
 func (r *StreamRegistry) Update(id string, updater func(*StreamInfo)) error {
+	if updater == nil {
+		return ErrInvalidUpdater
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -95,18 +119,57 @@ func (r *StreamRegistry) Update(id string, updater func(*StreamInfo)) error {
 		return ErrStreamNotFound
 	}
 
-	updater(info)
+	candidate := cloneStreamInfo(info)
+	updater(candidate)
+	if candidate.ID != id {
+		return ErrInvalidStreamID
+	}
+	if err := ValidateStreamID(candidate.ID); err != nil {
+		return err
+	}
+	candidate.Name = strings.TrimSpace(candidate.Name)
+	if err := validateStreamName(candidate.Name); err != nil {
+		return err
+	}
+	if !validState(candidate.State) {
+		return ErrInvalidStreamState
+	}
+	if candidate.Viewers < 0 {
+		return fmt.Errorf("viewer count cannot be negative")
+	}
+	if candidate.Bitrate < 0 {
+		return fmt.Errorf("bitrate cannot be negative")
+	}
+	for key, value := range candidate.Metadata {
+		if strings.TrimSpace(key) == "" || strings.IndexFunc(key, func(r rune) bool { return r == '\x00' || r == '\r' || r == '\n' }) >= 0 {
+			return fmt.Errorf("metadata key is invalid")
+		}
+		if strings.IndexFunc(value, func(r rune) bool { return r == '\x00' || r == '\r' || r == '\n' }) >= 0 {
+			return fmt.Errorf("metadata value is invalid")
+		}
+	}
+	*info = *candidate
+	info.Metadata = cloneMetadata(candidate.Metadata)
 	return nil
 }
 
 // SetState sets the state of a stream
 func (r *StreamRegistry) SetState(id string, state StreamState) error {
+	if !validState(state) {
+		return ErrInvalidStreamState
+	}
 	return r.Update(id, func(info *StreamInfo) {
+		if info.State == state {
+			return
+		}
+		now := time.Now().UTC()
 		info.State = state
 		if state == StreamStateLive {
-			now := time.Now()
 			info.StartedAt = &now
+		} else {
+			info.StartedAt = nil
 		}
+		info.LastActivityAt = now
 	})
 }
 
@@ -114,6 +177,7 @@ func (r *StreamRegistry) SetState(id string, state StreamState) error {
 func (r *StreamRegistry) IncrementViewers(id string) error {
 	return r.Update(id, func(info *StreamInfo) {
 		info.Viewers++
+		info.LastActivityAt = time.Now().UTC()
 	})
 }
 
@@ -123,6 +187,7 @@ func (r *StreamRegistry) DecrementViewers(id string) error {
 		if info.Viewers > 0 {
 			info.Viewers--
 		}
+		info.LastActivityAt = time.Now().UTC()
 	})
 }
 
@@ -133,9 +198,9 @@ func (r *StreamRegistry) List() []*StreamInfo {
 
 	result := make([]*StreamInfo, 0, len(r.streams))
 	for _, info := range r.streams {
-		copy := *info
-		result = append(result, &copy)
+		result = append(result, cloneStreamInfo(info))
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result
 }
 
@@ -146,6 +211,10 @@ func (r *StreamRegistry) Delete(id string) error {
 
 	if _, exists := r.streams[id]; !exists {
 		return ErrStreamNotFound
+	}
+	info := r.streams[id]
+	if info.Viewers > 0 || info.State == StreamStateLive || info.State == StreamStateRecording {
+		return ErrStreamActive
 	}
 
 	delete(r.streams, id)
@@ -175,6 +244,12 @@ func (r *StreamRegistry) LiveCount() int {
 
 // Cleanup starts a background goroutine to cleanup stale streams
 func (r *StreamRegistry) Cleanup(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -191,14 +266,31 @@ func (r *StreamRegistry) Cleanup(ctx context.Context, interval time.Duration) {
 }
 
 func (r *StreamRegistry) cleanupStaleStreams() {
-	// Implement cleanup logic for stale streams
-	// This can be enhanced based on requirements
+	cutoff := time.Now().UTC().Add(-r.streamTTL)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, info := range r.streams {
+		if info.Viewers > 0 || info.State == StreamStateLive || info.State == StreamStateRecording {
+			continue
+		}
+		lastActivity := info.LastActivityAt
+		if lastActivity.IsZero() {
+			lastActivity = info.CreatedAt
+		}
+		if lastActivity.Before(cutoff) {
+			delete(r.streams, id)
+		}
+	}
 }
 
 // Errors
 var (
-	ErrStreamExists    = &StreamError{Message: "stream already exists"}
-	ErrStreamNotFound  = &StreamError{Message: "stream not found"}
+	ErrStreamExists       = &StreamError{Message: "stream already exists"}
+	ErrStreamNotFound     = &StreamError{Message: "stream not found"}
+	ErrInvalidStreamID    = &StreamError{Message: "invalid stream ID"}
+	ErrInvalidUpdater     = &StreamError{Message: "stream updater is required"}
+	ErrInvalidStreamState = &StreamError{Message: "invalid stream state"}
+	ErrStreamActive       = &StreamError{Message: "stream is active"}
 )
 
 // StreamError represents a stream-related error
@@ -208,4 +300,37 @@ type StreamError struct {
 
 func (e *StreamError) Error() string {
 	return e.Message
+}
+
+func validState(state StreamState) bool {
+	switch state {
+	case StreamStateIdle, StreamStateLive, StreamStateRecording, StreamStateError:
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneMetadata(metadata map[string]string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	copy := make(map[string]string, len(metadata))
+	for key, value := range metadata {
+		copy[key] = value
+	}
+	return copy
+}
+
+func cloneStreamInfo(info *StreamInfo) *StreamInfo {
+	if info == nil {
+		return nil
+	}
+	copy := *info
+	copy.Metadata = cloneMetadata(info.Metadata)
+	if info.StartedAt != nil {
+		startedAt := *info.StartedAt
+		copy.StartedAt = &startedAt
+	}
+	return &copy
 }

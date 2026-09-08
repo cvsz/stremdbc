@@ -1,104 +1,98 @@
-.PHONY: build run test clean docker docker-up docker-down help
+.PHONY: all build run test test-race test-coverage tidy deps clean docker-build docker-run docker-stop docker-compose-up docker-compose-down docker-compose-monitoring fmt fmt-check lint vet verify help
 
-# Go parameters
-GOCMD=go
-GOBUILD=$(GOCMD) build
-GORUN=$(GOCMD) run
-GOTEST=$(GOCMD) test
-GOGET=$(GOCMD) get
-GOMOD=$(GOCMD) mod
-BINARY_NAME=stremdbc
-MAIN_PATH=./cmd/stremdbc
+GOCMD ?= go
+GOBUILD := $(GOCMD) build
+GORUN := $(GOCMD) run
+GOTEST := $(GOCMD) test
+GOMOD := $(GOCMD) mod
+STATICCHECK_VERSION ?= v0.8.1
+STATICCHECK := $(GORUN) honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+GOSEC_VERSION ?= v2.29.0
+GOSEC := $(GORUN) github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION)
+BINARY_NAME ?= stremdbc
+MAIN_PATH := ./cmd/stremdbc
+VERSION ?= 0.6.0
+LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
-# Build flags
-LDFLAGS=-ldflags "-X main.version=0.1.0"
+all: verify
 
-all: build
-
-## build: Build the binary
 build:
-	$(GOBUILD) $(LDFLAGS) -o $(BINARY_NAME) $(MAIN_PATH)
+	$(GOBUILD) $(LDFLAGS) -trimpath -o $(BINARY_NAME) $(MAIN_PATH)
 
-## run: Run the server
 run:
 	$(GORUN) $(LDFLAGS) $(MAIN_PATH)
 
-## test: Run tests
 test:
-	$(GOTEST) -v ./...
+	$(GOTEST) -count=1 ./...
 
-## test-coverage: Run tests with coverage
+test-race:
+	$(GOTEST) -race -count=1 ./...
+
 test-coverage:
-	$(GOTEST) -v -coverprofile=coverage.out ./...
+	$(GOTEST) -count=1 -coverprofile=coverage.out ./...
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 
-## tidy: Tidy go modules
 tidy:
 	$(GOMOD) tidy
 
-## deps: Download dependencies
 deps:
 	$(GOMOD) download
+	$(GOMOD) verify
 
-## clean: Clean build artifacts
 clean:
-	rm -f $(BINARY_NAME)
-	rm -f coverage.out coverage.html
+	rm -f $(BINARY_NAME) coverage.out coverage.html
 
-## docker-build: Build Docker image
 docker-build:
-	docker build -t stremdbc:latest .
+	docker build --pull -t stremdbc:local .
 
-## docker-run: Run Docker container
 docker-run:
-	docker run -d -p 8080:8080 -p 1935:1935 --name stremdbc stremdbc:latest
+	docker run --rm -d -p 127.0.0.1:8080:8080 --env-file .env --name stremdbc stremdbc:local
 
-## docker-stop: Stop Docker container
 docker-stop:
-	docker stop stremdbc
-	docker rm stremdbc
+	-docker rm -f stremdbc
 
-## docker-compose-up: Start with docker-compose
 docker-compose-up:
-	docker-compose up -d
+	docker compose up -d --build
 
-## docker-compose-down: Stop with docker-compose
 docker-compose-down:
-	docker-compose down
+	docker compose down
 
-## docker-compose-monitoring: Start with monitoring profile
 docker-compose-monitoring:
-	docker-compose --profile monitoring up -d
+	docker compose --profile monitoring up -d
 
-## fmt: Format code
 fmt:
 	$(GOCMD) fmt ./...
 
-## lint: Run linter
-lint:
-	golangci-lint run
+fmt-check:
+	@test -z "$$(gofmt -l .)" || { echo "gofmt required:"; gofmt -l .; exit 1; }
 
-## vet: Run go vet
+lint: fmt-check
+	$(STATICCHECK) ./...
+	$(GOSEC) ./...
+	$(GOCMD) vet ./...
+
 vet:
 	$(GOCMD) vet ./...
 
-## help: Show this help message
+verify: fmt-check
+	$(GOMOD) verify
+	$(GOMOD) tidy -diff
+	$(GOTEST) -race -count=1 ./...
+	$(STATICCHECK) ./...
+	$(GOSEC) ./...
+	$(GOCMD) vet ./...
+	$(GOBUILD) -trimpath -o /tmp/stremdbc-verify $(MAIN_PATH)
+
 help:
-	@echo "STREMDBC Makefile Commands:"
-	@echo ""
-	@echo "  build              - Build the binary"
-	@echo "  run                - Run the server"
-	@echo "  test               - Run tests"
-	@echo "  test-coverage      - Run tests with coverage report"
-	@echo "  tidy               - Tidy go modules"
-	@echo "  deps               - Download dependencies"
-	@echo "  clean              - Clean build artifacts"
-	@echo "  docker-build       - Build Docker image"
-	@echo "  docker-run         - Run Docker container"
-	@echo "  docker-stop        - Stop Docker container"
-	@echo "  docker-compose-up  - Start with docker-compose"
-	@echo "  docker-compose-down- Stop with docker-compose"
-	@echo "  fmt                - Format code"
-	@echo "  lint               - Run linter"
-	@echo "  vet                - Run go vet"
-	@echo ""
+	@echo "STREMDBC Makefile commands:"
+	@echo "  build                   Build the binary"
+	@echo "  run                     Run the service"
+	@echo "  test                    Run unit tests"
+	@echo "  test-race               Run race-enabled tests"
+	@echo "  test-coverage           Generate an HTML coverage report"
+	@echo "  tidy / deps             Maintain or download Go modules"
+	@echo "  fmt / fmt-check / lint  Format and run standard Go checks"
+	@echo "  vet                     Run go vet"
+	@echo "  verify                  Run the complete local verification gate"
+	@echo "  docker-build / run      Build or run the container"
+	@echo "  docker-compose-up/down  Manage the default Compose stack"

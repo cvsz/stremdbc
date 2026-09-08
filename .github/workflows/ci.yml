@@ -31,8 +31,20 @@ jobs:
       - name: Verify modules
         run: go mod verify
 
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Check module tidiness
+        run: go mod tidy -diff
+
       - name: Unit and race tests
         run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
+      - name: Gosec
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 ./...
 
       - name: Vet
         run: go vet ./...

@@ -223,14 +223,29 @@
         <div class="error-message" id="errorMessage"></div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <script>
-        // Extract stream ID from URL path
-        const pathParts = window.location.pathname.split('/');
-        const streamId = pathParts[pathParts.length - 1] || 'default';
+        // Extract and validate the stream ID from /player/{streamID}; never
+        // invent a fallback ID or interpolate an unsafe path component.
+        const playerPrefix = '/player/';
+        let streamId = '';
+        try {
+            streamId = decodeURIComponent(window.location.pathname.slice(playerPrefix.length));
+        } catch (err) {
+            streamId = '';
+        }
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(streamId)) {
+            streamId = '';
+        }
 
-        const API_BASE = '/api/v1';
-        const HLS_URL = `/hls/${streamId}/index.m3u8`;
+        let API_BASE = '/api/v1';
+        const playbackToken = new URLSearchParams(window.location.search).get('token') || '';
+        const HLS_URL = (() => {
+            if (!streamId) return '';
+            const url = new URL(`/hls/${encodeURIComponent(streamId)}/index.m3u8`, window.location.origin);
+            if (playbackToken) url.searchParams.set('token', playbackToken);
+            return `${url.pathname}${url.search}`;
+        })();
 
         const elements = {
             video: document.getElementById('videoPlayer'),
@@ -258,9 +273,26 @@
             elements.error.style.display = 'none';
         }
 
-        async function fetchStreamInfo() {
+        async function loadRuntimeConfig() {
             try {
-                const response = await fetch(`${API_BASE}/streams/${streamId}`);
+                const response = await fetch('/health', {headers: {Accept: 'application/json'}, cache: 'no-store'});
+                if (!response.ok) return;
+                const data = await response.json();
+                if (typeof data.api_base_path === 'string' && /^\/(?!\/)[^?#\\\s]*$/.test(data.api_base_path) && data.api_base_path !== '/' && !data.api_base_path.endsWith('/') && !data.api_base_path.includes('//')) {
+                    API_BASE = data.api_base_path;
+                }
+            } catch (err) {
+                // Keep the default path; the stream request reports the error.
+            }
+        }
+
+        async function fetchStreamInfo() {
+            if (!streamId) {
+                showError('A valid stream ID is required.');
+                return;
+            }
+            try {
+                const response = await fetch(`${API_BASE}/streams/${encodeURIComponent(streamId)}`);
                 if (!response.ok) {
                     throw new Error('Stream not found');
                 }
@@ -275,7 +307,6 @@
                 
                 if (data.state === 'LIVE') {
                     elements.statusText.textContent = 'Live';
-                    elements.statusDot?.classList.add('active');
                 } else {
                     elements.statusText.textContent = data.state;
                 }
@@ -283,18 +314,26 @@
                 hideError();
             } catch (err) {
                 console.error('Failed to fetch stream info:', err);
+                showError('Stream information is unavailable.');
             }
         }
 
         function initPlayer() {
+            if (!streamId) {
+                showError('A valid stream ID is required.');
+                return;
+            }
             elements.loading.style.display = 'block';
             elements.hlsLink.href = HLS_URL;
 
-            if (Hls.isSupported()) {
+            if (window.Hls && Hls.isSupported()) {
                 hls = new Hls({
                     enableWorker: true,
                     lowLatencyMode: false,
-                    backBufferLength: 90
+                    backBufferLength: 90,
+                    xhrSetup: (xhr) => {
+                        if (playbackToken) xhr.setRequestHeader('Authorization', `Bearer ${playbackToken}`);
+                    }
                 });
 
                 hls.loadSource(HLS_URL);
@@ -318,7 +357,7 @@
                 elements.video.src = HLS_URL;
                 elements.video.addEventListener('loadedmetadata', () => {
                     elements.loading.style.display = 'none';
-                    elements.video.play();
+                    elements.video.play().catch(() => {});
                 });
             } else {
                 elements.loading.style.display = 'none';
@@ -327,7 +366,8 @@
         }
 
         // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadRuntimeConfig();
             initPlayer();
             fetchStreamInfo();
             

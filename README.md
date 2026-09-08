@@ -1,162 +1,73 @@
 # STREMDBC
 
-Self-hosted streaming media server and management control plane written in Go. STREMDBC provides a single-ingest / multi-output architecture, protocol adapters, HLS/LL-HLS delivery, WebRTC signaling, FFmpeg transcoding, recording/DVR, authentication, Prometheus telemetry, Redis-backed cluster coordination, and a built-in management dashboard.
+STREMDBC is a Go streaming management control plane with bounded protocol
+adapters and reusable media-output/FFmpeg components.
 
-## Current status
+## Verified scope
 
-**Version:** `0.6.0`  
-**Roadmap implementation:** Phases 1-6 completed in source  
-**Release validation:** CI, CodeQL, container build, protocol conformance, and endurance/load testing
+The executable in this checkout is production-hardened as a management and
+control service. It is not yet a production media plane: no RTMP/RTP/libsrt
+media engine or ingest-to-output media graph is included. The service therefore
+fails closed rather than claiming that control traffic is media delivery.
 
-> "Implemented" means the component is present, configured, wired into the runtime lifecycle, and covered by automated build/test gates where practical. Production certification still requires real publisher/player interoperability and load testing in the target environment.
+| Component | Current contract |
+|---|---|
+| HTTP API, stream registry, auth, metrics | Available and lifecycle-tested |
+| HLS and LL-HLS writers | Available as library components; no executable media graph feeds them |
+| RTMP ingest | Bounded handshake/control parser; audio/video is rejected explicitly |
+| RTSP ingest | Bounded control/session adapter; media description/forwarding is unavailable |
+| SRT ingest/output | Metadata guard only; no libsrt transport or media forwarding |
+| WHIP/WHEP | SDP peer negotiation and publisher-track detection; RTP forwarding is unavailable |
+| RTMP/RTSP outputs | Bounded consumer/control endpoints; no outbound media writer |
+| Recorder, DVR, transcoder | Reusable managers; no executable API/media-source wiring |
+| Redis cluster | Redis node registration, heartbeat, discovery, and selection primitives |
+| PostgreSQL | Configuration is rejected until schema integration is implemented |
 
-## Architecture
+The default configuration keeps all media adapters disabled. Enable an adapter
+only after supplying the corresponding production media engine and integration.
 
-```text
- RTMP / RTSP / SRT / WebRTC
-              │
-              ▼
-      ┌─────────────────┐
-      │ STREMDBC CORE   │
-      │ stream registry │
-      │ auth / metrics  │
-      │ media pipeline  │
-      └────────┬────────┘
-               │
-     ┌─────────┼───────────┐
-     ▼         ▼           ▼
- HLS/LL-HLS  WebRTC   RTMP/RTSP/SRT
-     │                       │
-     └──────────┬────────────┘
-                ▼
-       Player / Dashboard
-                │
-       Prometheus / Cluster
-```
+## Local quick start
 
-## Roadmap completion
-
-### Phase 1 — Media Server Foundation ✅
-- [x] Go project structure
-- [x] Configuration and structured logging
-- [x] Health/readiness API
-- [x] Thread-safe stream registry
-- [x] RTMP ingest baseline
-- [x] HLS output manager
-- [x] Built-in player
-- [x] Docker packaging
-- [x] Prometheus metrics
-
-### Phase 2 — Professional Protocols ✅
-- [x] RTSP ingest adapter
-- [x] SRT ingest adapter
-- [x] WebRTC signaling/ingest adapter
-- [x] RTMP output adapter
-- [x] RTSP output adapter
-- [x] SRT output adapter
-- [x] LL-HLS manager
-- [x] Runtime configuration and lifecycle wiring for all adapters
-
-Protocol-level certification against multiple third-party clients remains a release-validation task.
-
-### Phase 3 — Transcoding ✅
-- [x] FFmpeg worker pool
-- [x] Configurable ABR ladder
-- [x] Cancellable transcoding jobs
-- [x] Hardware encoder discovery with CPU fallback
-- [x] Per-component transcoder telemetry
-
-### Phase 4 — Production Controls ✅
-- [x] API-key authorization
-- [x] HS256 JWT publish/play tokens
-- [x] JWT issuer/expiry/signing-method validation
-- [x] Recording manager
-- [x] DVR lifecycle and retention cleanup
-- [x] Prometheus metrics
-- [x] HTTP security headers and configurable CORS
-- [x] Graceful HTTP shutdown
-
-Authentication is disabled in the default sample configuration. Enable it only after setting a JWT secret of at least 32 characters and production API keys.
-
-### Phase 5 — Cluster Runtime ✅
-- [x] Redis-backed node registration and discovery
-- [x] Node heartbeat and health state
-- [x] Load-aware node selection primitives
-- [x] Cluster configuration validation
-- [x] Redis and PostgreSQL deployment profiles in Docker Compose
-- [x] Persistent cluster-service volumes
-
-Redis is the active coordination store. PostgreSQL is provisioned as the metadata persistence substrate for deployments that need durable external metadata; application-specific schema integration can be added without changing the media runtime contract.
-
-### Phase 6 — Management Platform ✅
-- [x] Built-in management dashboard at `/dashboard/`
-- [x] Live stream inventory
-- [x] Viewer/runtime telemetry
-- [x] Component statistics API
-- [x] Player and HLS launch links
-- [x] Prometheus endpoint integration
-
-The dashboard is intentionally zero-build and framework-free so the production image remains a single Go service plus static assets.
-
-## Quick start
-
-### Docker Compose
-
-```bash
-docker compose up -d --build
-```
-
-Open:
-
-- Dashboard: `http://localhost:8080/dashboard/`
-- Health: `http://localhost:8080/health`
-- Readiness: `http://localhost:8080/ready`
-- Metrics: `http://localhost:8080/metrics`
-
-Optional services:
-
-```bash
-# Prometheus + Grafana
-docker compose --profile monitoring up -d
-
-# Redis + PostgreSQL cluster substrate
-docker compose --profile cluster up -d
-```
-
-### Local Go build
-
-Requires Go 1.27+ and FFmpeg when recording/transcoding is enabled.
+Requires Go 1.27 or newer. FFmpeg is required only when using the recorder or
+transcoder library managers.
 
 ```bash
 go test ./...
-go build -o stremdbc ./cmd/stremdbc
-./stremdbc -config configs/config.dev.yaml
+make verify
+go run ./cmd/stremdbc -config configs/config.dev.yaml
 ```
 
-## Publishing and playback
+The development config binds the API to `127.0.0.1` and leaves authentication
+off. Do not expose it beyond the local machine.
 
-### RTMP ingest
+## Docker Compose
 
-```text
-Server:     rtmp://localhost:1935/live
-Stream key: mystream
+The production-oriented sample requires injected secrets and exposes host
+ports only on loopback by default:
+
+```bash
+cp .env.example .env
+# Replace every SET_ME/replace-* value with generated secret material.
+docker compose up -d --build
 ```
 
-### HLS playback
+Open `http://localhost:8080/health` and the authenticated management dashboard
+at `http://localhost:8080/dashboard/`. The default `configs/config.yaml`
+enables API authentication and expands `STREMDBC_JWT_SECRET` and
+`STREMDBC_API_KEY` from the environment. A missing or weak secret prevents
+startup.
 
-```text
-http://localhost:8080/hls/mystream/index.m3u8
-```
+Optional infrastructure profiles are available, but the application does not
+consume PostgreSQL metadata yet:
 
-### Built-in player
-
-```text
-http://localhost:8080/player/mystream
+```bash
+docker compose --profile monitoring up -d
+docker compose --profile cluster up -d
 ```
 
 ## Management API
 
-```http
+```text
 GET    /health
 GET    /ready
 GET    /metrics
@@ -169,63 +80,70 @@ DELETE /api/v1/streams/:id
 POST   /api/v1/auth/token
 ```
 
-When authentication is enabled, mutating API calls require `X-API-Key`. The token endpoint creates stream-scoped `publish` or `play` JWTs.
+The base path and metrics path are configurable. Mutating management requests
+and token issuance require `X-API-Key` whenever authentication is enabled.
+Playback and WHIP/WHEP requests require stream-scoped JWTs unless anonymous
+playback was explicitly enabled.
 
-See [`docs/API.md`](docs/API.md) for request/response details.
+See [`docs/API.md`](docs/API.md) for request and response details.
 
 ## Ports
 
+These are potential listener ports; the shipped configs disable the media
+adapters.
+
 | Port | Transport | Purpose |
-|---:|:---:|---|
-| 8080 | TCP | API, dashboard, HLS/LL-HLS static delivery |
-| 1935 | TCP | RTMP ingest |
-| 8554 | TCP | RTSP ingest |
-| 9000 | UDP | SRT ingest |
-| 8443 | TCP | WebRTC signaling |
-| 1936 | TCP | RTMP output adapter (optional) |
-| 8555 | TCP | RTSP output adapter (optional) |
-| 9001 | UDP | SRT output adapter (optional) |
+|---:|---|---|
+| 8080 | TCP | API, dashboard, and static delivery |
+| 1935 | TCP | RTMP control adapter |
+| 8554 | TCP | RTSP control adapter |
+| 9000 | UDP | SRT metadata adapter |
+| 8443 | TCP | WHIP/WHEP signaling adapter |
+| 1936 | TCP | RTMP output control adapter |
+| 8555 | TCP | RTSP output control adapter |
+| 9001 | UDP | SRT output metadata adapter |
 
 ## Security baseline
 
-- Runs as a non-root container user.
-- Docker Compose drops Linux capabilities and enables `no-new-privileges`.
-- JWT validation restricts the signing algorithm and issuer.
-- Authentication configuration rejects weak JWT secrets.
-- CodeQL runs on pull requests and `main`.
-- CI runs race-enabled tests, `go vet`, a binary build, and a container build.
-- Generated binaries are not stored in Git.
+- Explicit config files use strict YAML fields, environment expansion, path and listener validation, and fail closed on missing files or unsupported settings.
+- The container runs as a non-root user, drops Linux capabilities, and enables `no-new-privileges`.
+- JWTs are restricted to HS256, issuer, expiry, stream, action, and optional client-IP binding; API-key comparisons are bounded and constant-time per configured key.
+- Static delivery rejects traversal and symlink escapes, and media/control parsers enforce size limits and deadlines.
+- RTMP/RTSP ingest is rejected by configuration when authentication is enabled until publish-token enforcement is integrated into those protocols.
+- Compose binds host ports to loopback until an operator deliberately changes the exposure policy.
 
 ## Project structure
 
 ```text
-cmd/stremdbc/            application entry point
-configs/                 runtime configuration
+cmd/stremdbc/            executable and lifecycle orchestration
+configs/                 runtime examples
 internal/api/            management HTTP API
 internal/auth/           JWT and API-key controls
-internal/cluster/        Redis cluster coordination
-internal/core/           stream registry
-internal/dvr/            DVR lifecycle
-internal/ingest/         protocol ingest adapters
-internal/output/         HLS/LL-HLS and protocol outputs
-internal/recorder/       FFmpeg recording
-internal/transcoder/     FFmpeg ABR workers
-internal/metrics/        Prometheus metrics
-web/player/              playback UI
-web/dashboard/           management dashboard
-deployments/             deployment assets
-.github/workflows/       CI and security automation
+internal/cluster/        Redis coordination primitives
+internal/core/           stream registry and safe identifiers
+internal/dvr/             file-backed DVR manager
+internal/ingest/          bounded protocol adapters
+internal/output/          HLS/LL-HLS and output adapters
+internal/recorder/        FFmpeg recording manager
+internal/transcoder/      FFmpeg ABR worker pool
+internal/metrics/         Prometheus telemetry
+web/                      zero-build dashboard and player
+deployments/              deployment assets
+.github/workflows/        CI and CodeQL definitions
 ```
 
 ## Release gates
 
-A production release should pass all automated GitHub checks and then validate:
-
-1. RTMP/RTSP/SRT/WebRTC interoperability with the exact publisher/player matrix used in production.
-2. Multi-hour soak tests and failure/reconnect scenarios.
-3. Target bitrate/viewer concurrency load tests.
-4. TURN/TLS configuration when WebRTC is exposed across NAT/public networks.
-5. Secret injection, backup/restore, and Redis/PostgreSQL operational policy for clustered deployments.
+Local checks are reproducible with `make verify` and include formatting,
+module verification/tidiness, race tests, `staticcheck`, `gosec`, `go vet`,
+and a trimmed build.
+Hosted CI/CodeQL execution, container registry publication, third-party
+protocol interoperability, real ingest-to-HLS/WebRTC forwarding, soak/load
+testing, TURN/TLS public-network validation, and secret-manager integration
+remain external release gates. This checkout does not provide evidence for
+those gates. `govulncheck` currently reports `GO-2026-4479` in the Pion DTLS
+dependency with no upstream fixed version; keep WebRTC disabled until that
+advisory is resolved or formally accepted with compensating controls.
 
 ## License
 

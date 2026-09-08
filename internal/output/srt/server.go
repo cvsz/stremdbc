@@ -2,10 +2,14 @@ package srt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/policedbc/stremdbc/internal/config"
@@ -13,16 +17,26 @@ import (
 	"go.uber.org/zap"
 )
 
-// Server represents an SRT output transport endpoint.
+const (
+	maxOutputSessions = 4096
+	outputSessionTTL  = 2 * time.Minute
+)
+
+// Server represents a bounded SRT output control endpoint. It records
+// validated connection metadata but does not acknowledge inbound datagrams or
+// report them as outbound media without a libsrt/media writer.
 type Server struct {
 	config   *config.SRTOutputConfig
 	registry *core.StreamRegistry
 	logger   *zap.Logger
-	listener *net.UDPConn
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	running  bool
-	sessions map[string]*Session
+
+	mu        sync.Mutex
+	lifecycle sync.Mutex
+	listener  *net.UDPConn
+	running   bool
+	stopping  bool
+	sessions  map[string]*Session
+	acceptWG  sync.WaitGroup
 }
 
 type Session struct {
@@ -31,23 +45,41 @@ type Session struct {
 	Addr      *net.UDPAddr
 	State     string
 	CreatedAt time.Time
+	LastSeen  time.Time
 	BytesSent int64
 }
 
 func NewServer(cfg *config.SRTOutputConfig, registry *core.StreamRegistry, logger *zap.Logger) *Server {
-	return &Server{config: cfg, registry: registry, logger: logger.Named("srt-output"), sessions: make(map[string]*Session)}
+	if cfg == nil {
+		copyCfg := config.DefaultConfig().SRTOutput
+		cfg = &copyCfg
+	}
+	if registry == nil {
+		registry = core.NewStreamRegistry(nil)
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	copyCfg := *cfg
+	return &Server{config: &copyCfg, registry: registry, logger: logger.Named("srt-output"), sessions: make(map[string]*Session)}
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
-		return fmt.Errorf("server already running")
+		return fmt.Errorf("SRT output server already running")
 	}
-	s.running = true
 	s.mu.Unlock()
-
-	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
+	addr := net.JoinHostPort(s.config.Host, strconv.Itoa(s.config.Port))
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address %s: %w", addr, err)
@@ -56,116 +88,138 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	s.mu.Lock()
 	s.listener = listener
-	s.logger.Info("SRT output endpoint started", zap.String("address", addr))
-
-	s.wg.Add(1)
+	s.running = true
+	s.stopping = false
+	s.mu.Unlock()
+	s.logger.Info("SRT output control endpoint started", zap.String("address", listener.LocalAddr().String()))
+	s.acceptWG.Add(1)
 	go func() {
-		defer s.wg.Done()
-		s.acceptLoop(ctx)
+		defer s.acceptWG.Done()
+		s.acceptLoop(ctx, listener)
 	}()
 	return nil
 }
 
 func (s *Server) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	if !s.running {
+	if !s.running && s.listener == nil {
+		s.stopping = true
+		s.sessions = make(map[string]*Session)
 		s.mu.Unlock()
 		return nil
 	}
 	s.running = false
+	s.stopping = true
+	listener := s.listener
+	s.listener = nil
+	s.sessions = make(map[string]*Session)
 	s.mu.Unlock()
-
-	if s.listener != nil {
-		_ = s.listener.Close()
+	if listener != nil {
+		_ = listener.Close()
 	}
 	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	go func() { s.acceptWG.Wait(); close(done) }()
 	select {
 	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("timeout waiting for SRT output endpoint to stop")
 	}
 }
 
-func (s *Server) acceptLoop(ctx context.Context) {
-	buf := make([]byte, 1472)
+func (s *Server) acceptLoop(ctx context.Context, listener *net.UDPConn) {
+	defer func() {
+		_ = listener.Close()
+		s.mu.Lock()
+		if s.listener == listener {
+			s.running = false
+			s.listener = nil
+			s.sessions = make(map[string]*Session)
+		}
+		s.mu.Unlock()
+	}()
+	buf := make([]byte, 64*1024)
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			n, addr, err := s.listener.ReadFromUDP(buf)
-			if err != nil {
-				if ctx.Err() != nil || s.isClosedError(err) {
-					return
-				}
-				s.logger.Error("failed to read UDP packet", zap.Error(err))
+		_ = listener.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, addr, err := listener.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			packet := append([]byte(nil), buf[:n]...)
-			s.wg.Add(1)
-			go func(data []byte, remote *net.UDPAddr) {
-				defer s.wg.Done()
-				s.handlePacket(data, remote)
-			}(packet, addr)
+			s.logger.Error("failed to read UDP packet", zap.Error(err))
+			return
 		}
+		packet := append([]byte(nil), buf[:n]...)
+		s.handlePacket(packet, addr)
 	}
 }
 
 func (s *Server) handlePacket(data []byte, addr *net.UDPAddr) {
-	streamID := s.extractStreamID(data)
-	if streamID == "" {
-		streamID = fmt.Sprintf("stream_%d", time.Now().UnixNano())
-	}
-
-	s.mu.Lock()
-	session, exists := s.sessions[streamID]
-	if !exists {
-		session = &Session{ID: streamID, StreamID: streamID, Addr: addr, State: "active", CreatedAt: time.Now()}
-		s.sessions[streamID] = session
-	}
-	session.BytesSent += int64(len(data))
-	s.mu.Unlock()
-
-	ackLen := len(data)
-	if ackLen > 16 {
-		ackLen = 16
-	}
-	if ackLen == 0 {
+	if addr == nil {
 		return
 	}
-	ack := append([]byte(nil), data[:ackLen]...)
-	if _, err := s.listener.WriteToUDP(ack, addr); err != nil {
-		s.logger.Debug("failed to write UDP acknowledgment", zap.Error(err))
+	streamID := s.extractStreamID(data)
+	if streamID == "" {
+		return
 	}
+	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return
+	}
+	now := time.Now().UTC()
+	for id, candidate := range s.sessions {
+		if !candidate.LastSeen.IsZero() && now.Sub(candidate.LastSeen) > outputSessionTTL {
+			delete(s.sessions, id)
+		}
+	}
+	session, exists := s.sessions[streamID]
+	if !exists {
+		if len(s.sessions) >= maxOutputSessions {
+			s.mu.Unlock()
+			return
+		}
+		session = &Session{ID: nextSessionID(), StreamID: streamID, Addr: cloneUDPAddr(addr), State: "metadata", CreatedAt: now, LastSeen: now}
+		s.sessions[streamID] = session
+	}
+	session.Addr = cloneUDPAddr(addr)
+	session.LastSeen = now
+	// No bytes are counted as sent: this endpoint has no outbound media writer.
+	s.mu.Unlock()
 }
 
 func (s *Server) extractStreamID(data []byte) string {
-	if len(data) <= 9 {
+	value := string(data)
+	if !strings.HasPrefix(value, "streamid=") {
 		return ""
 	}
-	str := string(data)
-	idx := strings.Index(str, "streamid=")
-	if idx < 0 {
+	remainder := value[len("streamid="):]
+	end := strings.IndexAny(remainder, "&\x00\r\n")
+	if end < 0 {
+		end = len(remainder)
+	}
+	if end == 0 {
 		return ""
 	}
-	start := idx + len("streamid=")
-	end := strings.IndexAny(str[start:], "&\x00\r\n")
-	if end >= 0 {
-		return str[start : start+end]
+	decoded, err := url.QueryUnescape(remainder[:end])
+	if err != nil || core.ValidateStreamID(decoded) != nil {
+		return ""
 	}
-	return str[start:]
-}
-
-func (s *Server) isClosedError(err error) bool {
-	if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		return false
-	}
-	return true
+	return decoded
 }
 
 func (s *Server) GetSessionCount() int {
@@ -177,16 +231,45 @@ func (s *Server) GetSessionCount() int {
 func (s *Server) GetSession(id string) (*Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	session, exists := s.sessions[id]
+	_, session, exists := s.findSessionLocked(id)
 	if !exists {
 		return nil, false
 	}
 	copy := *session
+	copy.Addr = cloneUDPAddr(session.Addr)
 	return &copy, true
 }
 
 func (s *Server) RemoveSession(id string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.sessions, id)
+	key, _, exists := s.findSessionLocked(id)
+	if exists {
+		delete(s.sessions, key)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) findSessionLocked(identifier string) (string, *Session, bool) {
+	if session, exists := s.sessions[identifier]; exists {
+		return identifier, session, true
+	}
+	for key, session := range s.sessions {
+		if session.ID == identifier {
+			return key, session, true
+		}
+	}
+	return "", nil, false
+}
+
+var sessionCounter uint64
+
+func nextSessionID() string { return fmt.Sprintf("srt_%d", atomic.AddUint64(&sessionCounter, 1)) }
+
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	copy := *addr
+	copy.IP = append(net.IP(nil), addr.IP...)
+	return &copy
 }

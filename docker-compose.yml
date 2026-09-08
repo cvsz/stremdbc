@@ -6,14 +6,14 @@ services:
     image: stremdbc:local
     container_name: stremdbc
     ports:
-      - "8080:8080/tcp"   # HTTP/API/dashboard/HLS
-      - "1935:1935/tcp"   # RTMP ingest
-      - "8554:8554/tcp"   # RTSP ingest
-      - "8443:8443/tcp"   # WebRTC signaling
-      - "9000:9000/udp"   # SRT ingest
-      - "1936:1936/tcp"   # RTMP output (when enabled)
-      - "8555:8555/tcp"   # RTSP output (when enabled)
-      - "9001:9001/udp"   # SRT output (when enabled)
+      - "127.0.0.1:8080:8080/tcp"   # HTTP/API/dashboard/HLS
+      - "127.0.0.1:1935:1935/tcp"   # RTMP ingest
+      - "127.0.0.1:8554:8554/tcp"   # RTSP ingest
+      - "127.0.0.1:8443:8443/tcp"   # WebRTC signaling
+      - "127.0.0.1:9000:9000/udp"   # SRT ingest
+      - "127.0.0.1:1936:1936/tcp"   # RTMP output (when enabled)
+      - "127.0.0.1:8555:8555/tcp"   # RTSP output (when enabled)
+      - "127.0.0.1:9001:9001/udp"   # SRT output (when enabled)
     volumes:
       - ./configs:/app/configs:ro
       - hls_data:/tmp/hls
@@ -22,6 +22,10 @@ services:
       - dvr_data:/tmp/dvr
     environment:
       TZ: ${TZ:-UTC}
+      STREMDBC_JWT_SECRET: ${STREMDBC_JWT_SECRET:?STREMDBC_JWT_SECRET must be set}
+      STREMDBC_API_KEY: ${STREMDBC_API_KEY:?STREMDBC_API_KEY must be set}
+      STREMDBC_CORS_ORIGIN: ${STREMDBC_CORS_ORIGIN:-http://localhost:8080}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     restart: unless-stopped
     init: true
     security_opt:
@@ -38,9 +42,9 @@ services:
       - stremdbc-network
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.0-alpine
     container_name: stremdbc-redis
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"]
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -49,12 +53,12 @@ services:
       - stremdbc-network
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.4-alpine
     container_name: stremdbc-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-stremdbc}
       POSTGRES_USER: ${POSTGRES_USER:-stremdbc}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stremdbc-dev-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -68,10 +72,10 @@ services:
       - stremdbc-network
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.55.1
     container_name: stremdbc-prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./deployments/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -84,14 +88,14 @@ services:
       - stremdbc-network
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     container_name: stremdbc-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
       GF_USERS_ALLOW_SIGN_UP: "false"
     restart: unless-stopped
     depends_on:

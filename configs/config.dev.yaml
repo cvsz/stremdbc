@@ -1,32 +1,33 @@
 server:
-  host: "0.0.0.0"
+  host: "127.0.0.1"
   http_port: 8080
   read_timeout: 30s
   write_timeout: 30s
   idle_timeout: 120s
+  stream_ttl: 24h
 
 rtmp:
-  enable: true
+  enable: false
   host: "0.0.0.0"
   port: 1935
   read_timeout: 30s
   write_timeout: 30s
 
 rtsp:
-  enable: true
+  enable: false
   host: "0.0.0.0"
   port: 8554
   read_timeout: 30s
 
 srt:
-  enable: true
+  enable: false
   host: "0.0.0.0"
   port: 9000
   latency: 200ms
   passphrase: ""
 
 webrtc:
-  enable: true
+  enable: false
   host: "0.0.0.0"
   port: 8443
   use_turn: false
@@ -35,13 +36,14 @@ webrtc:
   key_file: ""
 
 hls:
-  enable: true
+  enable: false
   path: "/tmp/hls"
   segment_duration: 2s
   playlist_size: 5
 
 llhls:
-  enable: true
+  enable: false
+  path: "/tmp/llhls"
   segment_duration: 1s
   part_duration: 200ms
   playlist_size: 10
@@ -88,6 +90,7 @@ metrics:
 recorder:
   enable: false
   path: "/tmp/recordings"
+  ffmpeg_path: "ffmpeg"
 
 auth:
   enable: false
@@ -116,6 +119,7 @@ postgres:
 cluster:
   enable: false
   node_id: "dev-node"
+  advertise_host: ""
   discovery_addr: ""
   health_check_interval: 5s
 

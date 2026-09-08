@@ -6,6 +6,7 @@ RUN apk add --no-cache git ca-certificates
 
 COPY go.mod go.sum ./
 RUN go mod download
+RUN go mod verify
 
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -21,14 +22,16 @@ RUN apk add --no-cache ca-certificates tzdata ffmpeg wget && \
     addgroup -g 1000 stremdbc && \
     adduser -D -u 1000 -G stremdbc stremdbc
 
-COPY --from=builder /out/stremdbc /app/stremdbc
-COPY --from=builder /src/configs /app/configs
-COPY --from=builder /src/web /app/web
+COPY --from=builder --chown=1000:1000 /out/stremdbc /app/stremdbc
+COPY --from=builder --chown=1000:1000 /src/configs /app/configs
+COPY --from=builder --chown=1000:1000 /src/web /app/web
 
 RUN mkdir -p /tmp/hls /tmp/llhls /tmp/recordings /tmp/dvr && \
     chown -R stremdbc:stremdbc /tmp/hls /tmp/llhls /tmp/recordings /tmp/dvr /app
 
 USER stremdbc
+
+STOPSIGNAL SIGTERM
 
 EXPOSE 8080/tcp
 EXPOSE 1935/tcp

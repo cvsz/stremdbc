@@ -1,9 +1,12 @@
 package metrics
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"net/http"
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Metrics holds Prometheus metrics
@@ -16,6 +19,8 @@ type Metrics struct {
 	bytesSent       prometheus.Counter
 	connectionTotal prometheus.Counter
 	errorsTotal     prometheus.Counter
+	liveMu          sync.Mutex
+	liveCount       int
 }
 
 // NewMetrics creates a new Metrics instance
@@ -23,8 +28,8 @@ func NewMetrics() *Metrics {
 	registry := prometheus.NewRegistry()
 
 	// Register standard Go metrics
-	registry.MustRegister(prometheus.NewGoCollector())
-	registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	registry.MustRegister(collectors.NewGoCollector())
+	registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	m := &Metrics{
 		registry: registry,
@@ -96,27 +101,42 @@ func (m *Metrics) RecordStreamCreated() {
 
 // RecordStreamLive records a stream going live
 func (m *Metrics) RecordStreamLive() {
-	m.streamsLive.Inc()
+	m.liveMu.Lock()
+	m.liveCount++
+	m.streamsLive.Set(float64(m.liveCount))
+	m.liveMu.Unlock()
 }
 
 // RecordStreamOffline records a stream going offline
 func (m *Metrics) RecordStreamOffline() {
-	m.streamsLive.Dec()
+	m.liveMu.Lock()
+	if m.liveCount > 0 {
+		m.liveCount--
+	}
+	m.streamsLive.Set(float64(m.liveCount))
+	m.liveMu.Unlock()
 }
 
 // RecordViewers records the total viewer count
 func (m *Metrics) RecordViewers(count int) {
+	if count < 0 {
+		count = 0
+	}
 	m.viewersTotal.Set(float64(count))
 }
 
 // RecordBytesReceived records bytes received
 func (m *Metrics) RecordBytesReceived(bytes int64) {
-	m.bytesReceived.Add(float64(bytes))
+	if bytes > 0 {
+		m.bytesReceived.Add(float64(bytes))
+	}
 }
 
 // RecordBytesSent records bytes sent
 func (m *Metrics) RecordBytesSent(bytes int64) {
-	m.bytesSent.Add(float64(bytes))
+	if bytes > 0 {
+		m.bytesSent.Add(float64(bytes))
+	}
 }
 
 // RecordConnection records a connection
@@ -127,4 +147,19 @@ func (m *Metrics) RecordConnection() {
 // RecordError records an error
 func (m *Metrics) RecordError() {
 	m.errorsTotal.Inc()
+}
+
+// SetCurrentState updates gauges that represent the current registry state.
+func (m *Metrics) SetCurrentState(liveStreams, viewers int) {
+	if liveStreams < 0 {
+		liveStreams = 0
+	}
+	if viewers < 0 {
+		viewers = 0
+	}
+	m.liveMu.Lock()
+	m.liveCount = liveStreams
+	m.streamsLive.Set(float64(liveStreams))
+	m.liveMu.Unlock()
+	m.viewersTotal.Set(float64(viewers))
 }

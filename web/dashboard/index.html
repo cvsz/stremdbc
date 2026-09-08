@@ -33,7 +33,7 @@
   </section>
 
   <section class="section">
-    <div class="section-head"><h2>Live streams</h2><div class="actions"><a class="btn" href="/metrics" target="_blank" rel="noopener">Prometheus</a><button id="refresh">Refresh</button></div></div>
+    <div class="section-head"><h2>Live streams</h2><div class="actions"><a class="btn" id="metricsLink" href="/metrics" target="_blank" rel="noopener">Prometheus</a><button id="refresh">Refresh</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>Stream</th><th>State</th><th>Codec</th><th>Bitrate</th><th>Viewers</th><th>Started</th><th>Playback</th></tr></thead><tbody id="streamRows"><tr><td colspan="7" class="empty">Loading streams…</td></tr></tbody></table></div>
   </section>
 
@@ -41,7 +41,7 @@
     <div class="section-head"><h2>Components</h2><span class="muted" id="updated">Not updated</span></div>
     <div class="components" id="components"><div class="card component"><div class="label">Runtime</div><pre>Waiting for telemetry…</pre></div></div>
   </section>
-  <div class="footer">STREMDBC Phase 6 management platform · API-driven, zero-build deployment</div>
+  <div class="footer">STREMDBC management control plane · API-driven, zero-build deployment</div>
 </main>
 <script>
 (() => {
@@ -61,6 +61,10 @@
     return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
   };
   const text = (el, value) => { el.textContent = value == null || value === '' ? '—' : String(value); };
+  const validPath = value => typeof value === 'string' && /^\/(?!\/)[^?#\\\s]*$/.test(value) && value !== '/' && !value.endsWith('/') && !value.includes('//');
+  let apiBase = '/api/v1';
+  let metricsPath = '/metrics';
+  let authEnabled = false;
 
   async function json(url) {
     const res = await fetch(url, {headers:{Accept:'application/json'}, cache:'no-store'});
@@ -73,6 +77,9 @@
       const h = await json('/health');
       $('healthDot').className = 'dot ok'; text($('healthText'), h.status || 'healthy');
       if (h.version) text($('version'), `STREMDBC v${h.version} · Streaming management & observability`);
+      if (validPath(h.api_base_path)) apiBase = h.api_base_path;
+      if (validPath(h.metrics_path)) { metricsPath = h.metrics_path; $('metricsLink').href = metricsPath; }
+      authEnabled = h.auth_enabled === true;
     } catch (err) {
       $('healthDot').className = 'dot bad'; text($('healthText'), 'Unavailable');
     }
@@ -93,7 +100,9 @@
       const values = [stream.name || stream.id, stream.state, stream.codec || '—', stream.bitrate ? `${Math.round(stream.bitrate/1000)} kbps` : '—', stream.viewers ?? 0, stream.started_at ? new Date(stream.started_at).toLocaleString() : '—'];
       values.forEach((value, idx) => { const td = document.createElement('td'); if (idx === 1) { const badge=document.createElement('span'); badge.className=`badge ${String(value).toLowerCase()}`; badge.textContent=value; td.append(badge); } else td.textContent=value; tr.append(td); });
       const actions = document.createElement('td'); actions.style.display='flex'; actions.style.gap='6px';
-      actions.append(makeButton('Player', `/player/${encodeURIComponent(stream.id)}`), makeButton('HLS', `/hls/${encodeURIComponent(stream.id)}/index.m3u8`)); tr.append(actions); body.append(tr);
+      if (authEnabled) { const note=document.createElement('span'); note.className='muted'; note.textContent='Play token required'; actions.append(note); }
+      else actions.append(makeButton('Player', `/player/${encodeURIComponent(stream.id)}`), makeButton('HLS', `/hls/${encodeURIComponent(stream.id)}/index.m3u8`));
+      tr.append(actions); body.append(tr);
     });
   }
 
@@ -106,7 +115,7 @@
   async function refresh() {
     await loadHealth();
     try {
-      const [stats, streams] = await Promise.all([json('/api/v1/stats'), json('/api/v1/streams')]);
+      const [stats, streams] = await Promise.all([json(`${apiBase}/stats`), json(`${apiBase}/streams`)]);
       text($('streams'), stats.streams); text($('live'), stats.live_streams); text($('viewers'), stats.viewers); text($('memory'), fmtBytes(stats.memory_bytes)); text($('uptime'), fmtDuration(stats.uptime_seconds));
       renderStreams(streams); renderComponents(stats.components); text($('updated'), `Updated ${new Date().toLocaleTimeString()}`);
     } catch (err) {

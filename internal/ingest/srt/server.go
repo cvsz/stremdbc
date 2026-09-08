@@ -2,8 +2,11 @@ package srt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,203 +16,252 @@ import (
 	"go.uber.org/zap"
 )
 
-// Server represents an SRT server
+const (
+	maxMetadataStreams = 4096
+	metadataTTL        = 2 * time.Minute
+)
+
+// Server represents a bounded SRT control/telemetry endpoint. The repository
+// does not include a libsrt engine, so it does not acknowledge or forward
+// arbitrary UDP payloads as if they were SRT media.
 type Server struct {
 	config   *config.SRTConfig
 	registry *core.StreamRegistry
 	logger   *zap.Logger
-	listener *net.UDPConn
-	wg       sync.WaitGroup
-	mu       sync.Mutex
-	running  bool
-	streams  map[string]*StreamConnection
+
+	mu        sync.Mutex
+	lifecycle sync.Mutex
+	listener  *net.UDPConn
+	running   bool
+	stopping  bool
+	streams   map[string]*StreamConnection
+	acceptWG  sync.WaitGroup
 }
 
-// StreamConnection represents an SRT stream connection
+// StreamConnection represents validated stream metadata observed by the
+// endpoint and is returned as a snapshot.
 type StreamConnection struct {
 	StreamID  string
 	Conn      net.Conn
 	State     string
 	CreatedAt time.Time
+	LastSeen  time.Time
 	BytesRead int64
+	Addr      *net.UDPAddr
 }
 
-// NewServer creates a new SRT server
 func NewServer(cfg *config.SRTConfig, registry *core.StreamRegistry, logger *zap.Logger) *Server {
-	return &Server{
-		config:   cfg,
-		registry: registry,
-		logger:   logger.Named("srt"),
-		streams:  make(map[string]*StreamConnection),
+	if cfg == nil {
+		copyCfg := config.DefaultConfig().SRT
+		cfg = &copyCfg
 	}
+	if registry == nil {
+		registry = core.NewStreamRegistry(nil)
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	copyCfg := *cfg
+	return &Server{config: &copyCfg, registry: registry, logger: logger.Named("srt"), streams: make(map[string]*StreamConnection)}
 }
 
-// Start starts the SRT server
 func (s *Server) Start(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
 		return fmt.Errorf("server already running")
 	}
-	s.running = true
 	s.mu.Unlock()
-
-	addr := fmt.Sprintf("%s:%d", s.config.Host, s.config.Port)
+	addr := net.JoinHostPort(s.config.Host, strconv.Itoa(s.config.Port))
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address %s: %w", addr, err)
 	}
-	
 	listener, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
-
+	if err := ctx.Err(); err != nil {
+		_ = listener.Close()
+		return err
+	}
+	s.mu.Lock()
 	s.listener = listener
-	s.logger.Info("SRT server started", zap.String("address", addr))
-
-	s.wg.Add(1)
+	s.running = true
+	s.stopping = false
+	s.mu.Unlock()
+	s.logger.Info("SRT control endpoint started", zap.String("address", listener.LocalAddr().String()))
+	s.acceptWG.Add(1)
 	go func() {
-		defer s.wg.Done()
-		s.acceptLoop(ctx)
+		defer s.acceptWG.Done()
+		s.acceptLoop(ctx, listener)
 	}()
-
 	return nil
 }
 
-// Stop stops the SRT server
 func (s *Server) Stop(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
 	s.mu.Lock()
-	if !s.running {
+	if !s.running && s.listener == nil {
+		s.stopping = true
+		s.streams = make(map[string]*StreamConnection)
 		s.mu.Unlock()
 		return nil
 	}
 	s.running = false
+	s.stopping = true
+	listener := s.listener
+	s.listener = nil
+	s.streams = make(map[string]*StreamConnection)
 	s.mu.Unlock()
-
-	s.logger.Info("stopping SRT server")
-
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil {
-			s.logger.Error("failed to close listener", zap.Error(err))
-		}
+	if listener != nil {
+		_ = listener.Close()
 	}
-
 	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-
+	go func() { s.acceptWG.Wait(); close(done) }()
 	select {
 	case <-done:
 		return nil
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("timeout waiting for connections to close")
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
-func (s *Server) acceptLoop(ctx context.Context) {
-	buf := make([]byte, 1472) // SRT typical MTU
-
+func (s *Server) acceptLoop(ctx context.Context, listener *net.UDPConn) {
+	defer func() {
+		_ = listener.Close()
+		s.mu.Lock()
+		if s.listener == listener {
+			s.running = false
+			s.listener = nil
+			s.streams = make(map[string]*StreamConnection)
+		}
+		s.mu.Unlock()
+	}()
+	buf := make([]byte, 64*1024)
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			n, addr, err := s.listener.ReadFromUDP(buf)
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					return
-				}
-				s.logger.Error("failed to read from UDP", zap.Error(err))
+		_ = listener.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		n, addr, err := listener.ReadFromUDP(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				s.handlePacket(ctx, buf[:n], addr)
-			}()
+			s.logger.Error("failed to read UDP packet", zap.Error(err))
+			return
 		}
+		packet := append([]byte(nil), buf[:n]...)
+		s.handlePacket(ctx, packet, addr)
 	}
 }
 
 func (s *Server) handlePacket(ctx context.Context, data []byte, addr *net.UDPAddr) {
-	// Simplified SRT handshake handling
-	// Full SRT protocol implementation would use libsrt
-	
-	if len(data) < 16 {
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+	if addr == nil {
 		return
 	}
-
-	// Extract stream ID from packet (simplified)
 	streamID := s.extractStreamID(data)
 	if streamID == "" {
-		streamID = fmt.Sprintf("stream_%d", time.Now().UnixNano())
+		return
 	}
-
 	s.mu.Lock()
-	if _, exists := s.streams[streamID]; !exists {
-		s.streams[streamID] = &StreamConnection{
-			StreamID:  streamID,
-			State:     "active",
-			CreatedAt: time.Now(),
-			BytesRead: int64(len(data)),
-		}
-		
-		s.logger.Info("new SRT stream",
-			zap.String("stream_id", streamID),
-			zap.String("remote", addr.String()),
-		)
-	} else {
-		s.streams[streamID].BytesRead += int64(len(data))
+	if s.stopping {
+		s.mu.Unlock()
+		return
 	}
+	now := time.Now().UTC()
+	for id, candidate := range s.streams {
+		if !candidate.LastSeen.IsZero() && now.Sub(candidate.LastSeen) > metadataTTL {
+			delete(s.streams, id)
+		}
+	}
+	stream, exists := s.streams[streamID]
+	if !exists {
+		if len(s.streams) >= maxMetadataStreams {
+			s.mu.Unlock()
+			return
+		}
+		stream = &StreamConnection{StreamID: streamID, State: "metadata", CreatedAt: now, LastSeen: now, Addr: cloneUDPAddr(addr)}
+		s.streams[streamID] = stream
+		s.logger.Info("validated SRT stream metadata", zap.String("stream_id", streamID), zap.String("remote", addr.String()))
+	}
+	stream.LastSeen = now
+	stream.BytesRead += int64(len(data))
+	stream.Addr = cloneUDPAddr(addr)
 	s.mu.Unlock()
-
-	// Send acknowledgment (simplified)
-	ack := make([]byte, 16)
-	copy(ack, data[:16])
-	_, _ = s.listener.WriteToUDP(ack, addr)
 }
 
 func (s *Server) extractStreamID(data []byte) string {
-	// Extract streamid from SRT handshake packet
-	// This is a simplified implementation
-	if len(data) > 32 {
-		// Look for streamid= in the packet
-		str := string(data)
-		idx := strings.Index(str, "streamid=")
-		if idx >= 0 {
-			start := idx + 9
-			end := strings.IndexAny(str[start:], "&\x00\r\n")
-			if end > 0 {
-				return str[start : start+end]
-			}
-			return str[start:]
-		}
+	value := string(data)
+	if !strings.HasPrefix(value, "streamid=") {
+		return ""
 	}
-	return ""
+	start := len("streamid=")
+	remainder := value[start:]
+	end := strings.IndexAny(remainder, "&\x00\r\n")
+	if end < 0 {
+		end = len(remainder)
+	}
+	if end == 0 {
+		return ""
+	}
+	decoded, err := url.QueryUnescape(remainder[:end])
+	if err != nil || core.ValidateStreamID(decoded) != nil {
+		return ""
+	}
+	return decoded
 }
 
-// GetStreamCount returns the number of active streams
 func (s *Server) GetStreamCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.streams)
 }
 
-// GetStream returns a stream by ID
 func (s *Server) GetStream(id string) (*StreamConnection, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stream, exists := s.streams[id]
-	return stream, exists
+	if !exists {
+		return nil, false
+	}
+	copy := *stream
+	copy.Conn = nil
+	copy.Addr = cloneUDPAddr(stream.Addr)
+	return &copy, true
 }
 
-// RemoveStream removes a stream
 func (s *Server) RemoveStream(id string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.streams, id)
+	s.mu.Unlock()
+}
+
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	copy := *addr
+	copy.IP = append(net.IP(nil), addr.IP...)
+	return &copy
 }
