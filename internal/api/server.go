@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/policedbc/stremdbc/internal/auth"
 	"github.com/policedbc/stremdbc/internal/config"
 	"github.com/policedbc/stremdbc/internal/core"
 	"github.com/policedbc/stremdbc/internal/metrics"
@@ -19,6 +20,7 @@ type Server struct {
 	metrics     *metrics.Metrics
 	logger      *zap.Logger
 	mux         *http.ServeMux
+	authManager *auth.Manager
 }
 
 // NewServer creates a new API server
@@ -33,6 +35,11 @@ func NewServer(cfg *config.APIConfig, registry *core.StreamRegistry, m *metrics.
 
 	s.registerRoutes()
 	return s
+}
+
+// SetAuthManager sets the authentication manager
+func (s *Server) SetAuthManager(am *auth.Manager) {
+	s.authManager = am
 }
 
 // registerRoutes registers all API routes

@@ -3,35 +3,13 @@
 *.o
 *.obj
 *.out
-stremdbc
-
 # Dependencies
 vendor/
-
 # Logs and temp files
 *.log
 *.tmp
-
 # Environment
 .env
 .env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
-
-# OS specific
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Build and dist
-dist/
-build/
-target/
+.env.*
 ```
