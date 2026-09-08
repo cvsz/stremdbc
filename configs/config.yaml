@@ -1,0 +1,38 @@
+server:
+  host: "0.0.0.0"
+  http_port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  idle_timeout: 120s
+
+rtmp:
+  enable: true
+  host: "0.0.0.0"
+  port: 1935
+  read_timeout: 30s
+  write_timeout: 30s
+
+hls:
+  enable: true
+  path: "/tmp/hls"
+  segment_duration: 2s
+  playlist_size: 5
+
+api:
+  enable: true
+  base_path: "/api/v1"
+  cors_origins:
+    - "*"
+
+logging:
+  level: "info"
+  format: "json"
+  output_path: "stdout"
+
+metrics:
+  enable: true
+  path: "/metrics"
+
+recorder:
+  enable: false
+  path: "/tmp/recordings"
