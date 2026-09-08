@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>STREMDBC Control Plane</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#08101d;color:#e5edf8}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top right,#172554 0,transparent 32%),#08101d}
+    header{position:sticky;top:0;z-index:3;background:rgba(8,16,29,.88);backdrop-filter:blur(18px);border-bottom:1px solid #233149;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+    h1{font-size:18px;margin:0}.sub{color:#8ea2bf;font-size:12px;margin-top:4px}.status{display:flex;gap:8px;align-items:center;font-size:13px}.dot{width:9px;height:9px;border-radius:50%;background:#f59e0b}.dot.ok{background:#22c55e}.dot.bad{background:#ef4444}
+    main{max-width:1450px;margin:0 auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.card{background:#0d1727;border:1px solid #233149;border-radius:14px;padding:16px;box-shadow:0 8px 28px rgba(0,0,0,.14)}
+    .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#8ea2bf}.value{font-size:28px;font-weight:700;margin-top:8px}.section{margin-top:22px}.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}.section h2{font-size:15px;margin:0}.actions{display:flex;gap:8px}
+    button,a.btn{border:1px solid #31425f;background:#15223a;color:#e5edf8;border-radius:9px;padding:8px 11px;text-decoration:none;font:inherit;font-size:12px;cursor:pointer}button:hover,a.btn:hover{background:#1b2b49}
+    .table-wrap{overflow:auto;border:1px solid #233149;border-radius:14px;background:#0d1727}table{width:100%;border-collapse:collapse;min-width:830px}th,td{text-align:left;padding:12px 14px;border-bottom:1px solid #1d2a40;font-size:12px}th{color:#8ea2bf;font-size:10px;text-transform:uppercase;letter-spacing:.08em;background:#101c30}tr:last-child td{border-bottom:0}.badge{display:inline-flex;border:1px solid #31425f;border-radius:999px;padding:3px 8px;font-size:10px}.badge.live{border-color:#166534;color:#86efac}.badge.error{border-color:#991b1b;color:#fca5a5}.muted{color:#8ea2bf}.empty{text-align:center;padding:32px;color:#8ea2bf}
+    .components{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.component pre{margin:10px 0 0;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;color:#b8c7dc}.footer{color:#60738f;text-align:center;font-size:11px;margin:22px 0 4px}
+    @media(max-width:1000px){.grid{grid-template-columns:repeat(2,1fr)}.components{grid-template-columns:1fr}}@media(max-width:560px){header{padding:14px 16px}main{padding:16px}.grid{grid-template-columns:1fr 1fr}.value{font-size:22px}}
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>STREMDBC Control Plane</h1><div class="sub" id="version">Streaming management & observability</div></div>
+  <div class="status"><span id="healthDot" class="dot"></span><span id="healthText">Connecting…</span></div>
+</header>
+<main>
+  <section class="grid" aria-label="Platform summary">
+    <div class="card"><div class="label">Streams</div><div class="value" id="streams">—</div></div>
+    <div class="card"><div class="label">Live</div><div class="value" id="live">—</div></div>
+    <div class="card"><div class="label">Viewers</div><div class="value" id="viewers">—</div></div>
+    <div class="card"><div class="label">Memory</div><div class="value" id="memory">—</div></div>
+    <div class="card"><div class="label">Uptime</div><div class="value" id="uptime">—</div></div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>Live streams</h2><div class="actions"><a class="btn" href="/metrics" target="_blank" rel="noopener">Prometheus</a><button id="refresh">Refresh</button></div></div>
+    <div class="table-wrap"><table><thead><tr><th>Stream</th><th>State</th><th>Codec</th><th>Bitrate</th><th>Viewers</th><th>Started</th><th>Playback</th></tr></thead><tbody id="streamRows"><tr><td colspan="7" class="empty">Loading streams…</td></tr></tbody></table></div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>Components</h2><span class="muted" id="updated">Not updated</span></div>
+    <div class="components" id="components"><div class="card component"><div class="label">Runtime</div><pre>Waiting for telemetry…</pre></div></div>
+  </section>
+  <div class="footer">STREMDBC Phase 6 management platform · API-driven, zero-build deployment</div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const fmtBytes = n => {
+    if (!Number.isFinite(Number(n))) return '—';
+    const units = ['B','KB','MB','GB','TB']; let x = Number(n), i = 0;
+    while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+    return `${x >= 10 || i === 0 ? x.toFixed(0) : x.toFixed(1)} ${units[i]}`;
+  };
+  const fmtDuration = seconds => {
+    seconds = Number(seconds) || 0;
+    const d = Math.floor(seconds / 86400); seconds %= 86400;
+    const h = Math.floor(seconds / 3600); seconds %= 3600;
+    const m = Math.floor(seconds / 60);
+    return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+  };
+  const text = (el, value) => { el.textContent = value == null || value === '' ? '—' : String(value); };
+
+  async function json(url) {
+    const res = await fetch(url, {headers:{Accept:'application/json'}, cache:'no-store'});
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json();
+  }
+
+  async function loadHealth() {
+    try {
+      const h = await json('/health');
+      $('healthDot').className = 'dot ok'; text($('healthText'), h.status || 'healthy');
+      if (h.version) text($('version'), `STREMDBC v${h.version} · Streaming management & observability`);
+    } catch (err) {
+      $('healthDot').className = 'dot bad'; text($('healthText'), 'Unavailable');
+    }
+  }
+
+  function makeButton(label, href) {
+    const a = document.createElement('a'); a.className = 'btn'; a.textContent = label; a.href = href; a.target = '_blank'; a.rel = 'noopener'; return a;
+  }
+
+  function renderStreams(payload) {
+    const body = $('streamRows'); body.replaceChildren();
+    const streams = Array.isArray(payload.streams) ? payload.streams : [];
+    if (!streams.length) {
+      const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 7; td.className = 'empty'; td.textContent = 'No streams registered'; tr.append(td); body.append(tr); return;
+    }
+    streams.forEach(stream => {
+      const tr = document.createElement('tr');
+      const values = [stream.name || stream.id, stream.state, stream.codec || '—', stream.bitrate ? `${Math.round(stream.bitrate/1000)} kbps` : '—', stream.viewers ?? 0, stream.started_at ? new Date(stream.started_at).toLocaleString() : '—'];
+      values.forEach((value, idx) => { const td = document.createElement('td'); if (idx === 1) { const badge=document.createElement('span'); badge.className=`badge ${String(value).toLowerCase()}`; badge.textContent=value; td.append(badge); } else td.textContent=value; tr.append(td); });
+      const actions = document.createElement('td'); actions.style.display='flex'; actions.style.gap='6px';
+      actions.append(makeButton('Player', `/player/${encodeURIComponent(stream.id)}`), makeButton('HLS', `/hls/${encodeURIComponent(stream.id)}/index.m3u8`)); tr.append(actions); body.append(tr);
+    });
+  }
+
+  function renderComponents(components) {
+    const root = $('components'); root.replaceChildren(); const entries = Object.entries(components || {});
+    if (!entries.length) { const card=document.createElement('div'); card.className='card component'; card.innerHTML='<div class="label">Runtime</div><pre>No optional components enabled.</pre>'; root.append(card); return; }
+    entries.sort(([a],[b]) => a.localeCompare(b)).forEach(([name, data]) => { const card=document.createElement('div'); card.className='card component'; const label=document.createElement('div'); label.className='label'; label.textContent=name; const pre=document.createElement('pre'); pre.textContent=JSON.stringify(data, null, 2); card.append(label,pre); root.append(card); });
+  }
+
+  async function refresh() {
+    await loadHealth();
+    try {
+      const [stats, streams] = await Promise.all([json('/api/v1/stats'), json('/api/v1/streams')]);
+      text($('streams'), stats.streams); text($('live'), stats.live_streams); text($('viewers'), stats.viewers); text($('memory'), fmtBytes(stats.memory_bytes)); text($('uptime'), fmtDuration(stats.uptime_seconds));
+      renderStreams(streams); renderComponents(stats.components); text($('updated'), `Updated ${new Date().toLocaleTimeString()}`);
+    } catch (err) {
+      text($('updated'), `Telemetry error: ${err.message}`);
+    }
+  }
+
+  $('refresh').addEventListener('click', refresh);
+  refresh(); setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

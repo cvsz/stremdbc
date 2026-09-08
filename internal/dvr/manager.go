@@ -13,44 +13,36 @@ import (
 	"go.uber.org/zap"
 )
 
-// Manager manages DVR functionality
+// Manager manages DVR functionality.
 type Manager struct {
-	config       *config.DVRConfig
-	registry     *core.StreamRegistry
-	logger       *zap.Logger
-	outputPath   string
-	mu           sync.Mutex
-	sessions     map[string]*DVRSession
-	maxDuration  time.Duration
+	config      *config.DVRConfig
+	registry    *core.StreamRegistry
+	logger      *zap.Logger
+	outputPath  string
+	mu          sync.Mutex
+	sessions    map[string]*DVRSession
+	maxDuration time.Duration
 }
 
-// DVRSession represents a DVR recording session
+// DVRSession represents a DVR recording session.
 type DVRSession struct {
-	ID          string
-	StreamID    string
-	CreatedAt   time.Time
-	Duration    time.Duration
-	State       string // "recording", "paused", "stopped"
-	OutputPath  string
-	FileSize    int64
+	ID         string
+	StreamID   string
+	CreatedAt  time.Time
+	Duration   time.Duration
+	State      string // recording, paused, stopped
+	OutputPath string
+	FileSize   int64
 }
 
-// DVRConfig holds DVR configuration
-type DVRConfig struct {
-	Enable      bool          `yaml:"enable"`
-	Path        string        `yaml:"path"`
-	MaxDuration time.Duration `yaml:"max_duration"`
-	Format      string        `yaml:"format"`
-}
-
-// NewManager creates a new DVR manager
+// NewManager creates a new DVR manager.
 func NewManager(cfg *config.DVRConfig, registry *core.StreamRegistry, logger *zap.Logger) (*Manager, error) {
 	outputPath := cfg.Path
 	if outputPath == "" {
 		outputPath = "/tmp/dvr"
 	}
 
-	if err := os.MkdirAll(outputPath, 0755); err != nil {
+	if err := os.MkdirAll(outputPath, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create DVR directory: %w", err)
 	}
 
@@ -69,33 +61,43 @@ func NewManager(cfg *config.DVRConfig, registry *core.StreamRegistry, logger *za
 	}, nil
 }
 
-// Start starts the DVR manager
 func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Info("DVR manager started",
 		zap.String("output_path", m.outputPath),
 		zap.Duration("max_duration", m.maxDuration),
 	)
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := m.CleanupOldRecordings(); err != nil {
+					m.logger.Error("DVR cleanup failed", zap.Error(err))
+				}
+			}
+		}
+	}()
 	return nil
 }
 
-// Stop stops the DVR manager
 func (m *Manager) Stop() error {
 	m.logger.Info("stopping DVR manager")
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Stop all active sessions
-	for _, session := range m.sessions {
-		if session.State == "recording" {
-			m.stopSession(session.ID)
+	for streamID, session := range m.sessions {
+		if session.State == "recording" || session.State == "paused" {
+			if err := m.stopSessionLocked(streamID); err != nil {
+				m.logger.Error("failed to stop DVR session", zap.String("stream_id", streamID), zap.Error(err))
+			}
 		}
 	}
-
 	return nil
 }
 
-// StartRecording starts DVR recording for a stream
 func (m *Manager) StartRecording(streamID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -103,9 +105,12 @@ func (m *Manager) StartRecording(streamID string) error {
 	if _, exists := m.sessions[streamID]; exists {
 		return fmt.Errorf("DVR session already exists for stream")
 	}
+	if _, exists := m.registry.Get(streamID); !exists {
+		return core.ErrStreamNotFound
+	}
 
 	streamPath := filepath.Join(m.outputPath, streamID)
-	if err := os.MkdirAll(streamPath, 0755); err != nil {
+	if err := os.MkdirAll(streamPath, 0o755); err != nil {
 		return fmt.Errorf("failed to create stream directory: %w", err)
 	}
 
@@ -116,27 +121,24 @@ func (m *Manager) StartRecording(streamID string) error {
 		State:      "recording",
 		OutputPath: filepath.Join(streamPath, fmt.Sprintf("recording_%d.ts", time.Now().Unix())),
 	}
-
 	m.sessions[streamID] = session
+	_ = m.registry.SetState(streamID, core.StreamStateRecording)
 
 	m.logger.Info("DVR recording started",
 		zap.String("stream_id", streamID),
 		zap.String("session_id", session.ID),
 		zap.String("output_path", session.OutputPath),
 	)
-
 	return nil
 }
 
-// StopRecording stops DVR recording for a stream
 func (m *Manager) StopRecording(streamID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	return m.stopSession(streamID)
+	return m.stopSessionLocked(streamID)
 }
 
-func (m *Manager) stopSession(streamID string) error {
+func (m *Manager) stopSessionLocked(streamID string) error {
 	session, exists := m.sessions[streamID]
 	if !exists {
 		return fmt.Errorf("DVR session not found")
@@ -144,17 +146,16 @@ func (m *Manager) stopSession(streamID string) error {
 
 	session.State = "stopped"
 	session.Duration = time.Since(session.CreatedAt)
+	_ = m.registry.SetState(streamID, core.StreamStateLive)
 
 	m.logger.Info("DVR recording stopped",
 		zap.String("stream_id", streamID),
 		zap.String("session_id", session.ID),
 		zap.Duration("duration", session.Duration),
 	)
-
 	return nil
 }
 
-// PauseRecording pauses DVR recording
 func (m *Manager) PauseRecording(streamID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,18 +164,14 @@ func (m *Manager) PauseRecording(streamID string) error {
 	if !exists {
 		return fmt.Errorf("DVR session not found")
 	}
-
 	if session.State != "recording" {
 		return fmt.Errorf("session is not recording")
 	}
-
 	session.State = "paused"
 	m.logger.Info("DVR recording paused", zap.String("stream_id", streamID))
-
 	return nil
 }
 
-// ResumeRecording resumes DVR recording
 func (m *Manager) ResumeRecording(streamID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -183,91 +180,74 @@ func (m *Manager) ResumeRecording(streamID string) error {
 	if !exists {
 		return fmt.Errorf("DVR session not found")
 	}
-
 	if session.State != "paused" {
 		return fmt.Errorf("session is not paused")
 	}
-
 	session.State = "recording"
 	m.logger.Info("DVR recording resumed", zap.String("stream_id", streamID))
-
 	return nil
 }
 
-// GetSession returns a DVR session by stream ID
 func (m *Manager) GetSession(streamID string) (*DVRSession, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, exists := m.sessions[streamID]
-	return session, exists
+	if !exists {
+		return nil, false
+	}
+	copy := *session
+	return &copy, true
 }
 
-// GetSessionCount returns the number of active DVR sessions
 func (m *Manager) GetSessionCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
 	for _, session := range m.sessions {
-		if session.State == "recording" {
+		if session.State == "recording" || session.State == "paused" {
 			count++
 		}
 	}
 	return count
 }
 
-// GetStats returns DVR statistics
 func (m *Manager) GetStats() map[string]interface{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	totalSessions := len(m.sessions)
 	activeSessions := 0
 	totalFileSize := int64(0)
-
 	for _, session := range m.sessions {
-		if session.State == "recording" {
+		if session.State == "recording" || session.State == "paused" {
 			activeSessions++
 		}
 		totalFileSize += session.FileSize
 	}
-
 	return map[string]interface{}{
-		"total_sessions":  totalSessions,
+		"total_sessions":  len(m.sessions),
 		"active_sessions": activeSessions,
 		"total_file_size": totalFileSize,
 		"output_path":     m.outputPath,
 	}
 }
 
-// CleanupOldRecordings removes recordings older than maxDuration
 func (m *Manager) CleanupOldRecordings() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	cutoff := time.Now().Add(-m.maxDuration)
-
-	err := filepath.Walk(m.outputPath, func(path string, info os.FileInfo, err error) error {
+	return filepath.Walk(m.outputPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
-		if info.IsDir() {
+		if info.IsDir() || !info.ModTime().Before(cutoff) {
 			return nil
 		}
-
-		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(path); err != nil {
-				m.logger.Error("failed to remove old recording",
-					zap.String("path", path),
-					zap.Error(err),
-				)
-			} else {
-				m.logger.Info("removed old recording", zap.String("path", path))
-			}
+		if err := os.Remove(path); err != nil {
+			m.logger.Error("failed to remove old recording", zap.String("path", path), zap.Error(err))
+			return nil
 		}
-
+		m.logger.Info("removed old recording", zap.String("path", path))
 		return nil
 	})
-
-	return err
 }

@@ -12,11 +12,63 @@ rtmp:
   read_timeout: 30s
   write_timeout: 30s
 
+rtsp:
+  enable: true
+  host: "0.0.0.0"
+  port: 8554
+  read_timeout: 30s
+
+srt:
+  enable: true
+  host: "0.0.0.0"
+  port: 9000
+  latency: 200ms
+  passphrase: ""
+
+webrtc:
+  enable: true
+  host: "0.0.0.0"
+  port: 8443
+  use_turn: false
+  tls_enabled: false
+  cert_file: ""
+  key_file: ""
+
 hls:
   enable: true
   path: "/tmp/hls"
   segment_duration: 2s
   playlist_size: 5
+
+llhls:
+  enable: true
+  segment_duration: 1s
+  part_duration: 200ms
+  playlist_size: 10
+
+rtmp_output:
+  enable: false
+  host: "0.0.0.0"
+  port: 1936
+  read_timeout: 30s
+
+rtsp_output:
+  enable: false
+  host: "0.0.0.0"
+  port: 8555
+  read_timeout: 30s
+
+srt_output:
+  enable: false
+  host: "0.0.0.0"
+  port: 9001
+  latency: 200ms
+
+dvr:
+  enable: false
+  path: "/tmp/dvr"
+  max_duration: 4h
+  format: "mpegts"
 
 api:
   enable: true
@@ -36,3 +88,65 @@ metrics:
 recorder:
   enable: false
   path: "/tmp/recordings"
+
+auth:
+  enable: false
+  jwt_secret: ""
+  jwt_expiry: "24h"
+  api_keys: []
+  allow_anonymous: true
+
+redis:
+  enable: false
+  host: "redis"
+  port: 6379
+  password: ""
+  db: 0
+  prefix: "stremdbc:"
+
+postgres:
+  enable: false
+  host: "postgres"
+  port: 5432
+  user: "stremdbc"
+  password: ""
+  database: "stremdbc"
+  ssl_mode: "require"
+
+cluster:
+  enable: false
+  node_id: ""
+  discovery_addr: ""
+  health_check_interval: 5s
+
+transcoder:
+  enable: false
+  worker_count: 2
+  ffmpeg_path: "ffmpeg"
+  gpu_enabled: false
+  output_format: "hls"
+  abr_ladder:
+    - name: "1080p"
+      width: 1920
+      height: 1080
+      bitrate: 5000000
+      frame_rate: 30
+      audio_bitrate: 192000
+    - name: "720p"
+      width: 1280
+      height: 720
+      bitrate: 3000000
+      frame_rate: 30
+      audio_bitrate: 128000
+    - name: "480p"
+      width: 854
+      height: 480
+      bitrate: 1500000
+      frame_rate: 30
+      audio_bitrate: 96000
+    - name: "360p"
+      width: 640
+      height: 360
+      bitrate: 800000
+      frame_rate: 30
+      audio_bitrate: 64000

@@ -1,23 +1,35 @@
-version: '3.8'
-
 services:
   stremdbc:
     build:
       context: .
       dockerfile: Dockerfile
+    image: stremdbc:local
     container_name: stremdbc
     ports:
-      - "8080:8080"   # HTTP/API
-      - "1935:1935"   # RTMP
+      - "8080:8080/tcp"   # HTTP/API/dashboard/HLS
+      - "1935:1935/tcp"   # RTMP ingest
+      - "8554:8554/tcp"   # RTSP ingest
+      - "8443:8443/tcp"   # WebRTC signaling
+      - "9000:9000/udp"   # SRT ingest
+      - "1936:1936/tcp"   # RTMP output (when enabled)
+      - "8555:8555/tcp"   # RTSP output (when enabled)
+      - "9001:9001/udp"   # SRT output (when enabled)
     volumes:
       - ./configs:/app/configs:ro
       - hls_data:/tmp/hls
+      - llhls_data:/tmp/llhls
       - recordings:/tmp/recordings
+      - dvr_data:/tmp/dvr
     environment:
-      - TZ=UTC
+      TZ: ${TZ:-UTC}
     restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -25,7 +37,36 @@ services:
     networks:
       - stremdbc-network
 
-  # Optional: Prometheus for metrics
+  redis:
+    image: redis:7-alpine
+    container_name: stremdbc-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    profiles: ["cluster"]
+    networks:
+      - stremdbc-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: stremdbc-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-stremdbc}
+      POSTGRES_USER: ${POSTGRES_USER:-stremdbc}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stremdbc-dev-only}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stremdbc} -d ${POSTGRES_DB:-stremdbc}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles: ["cluster"]
+    networks:
+      - stremdbc-network
+
   prometheus:
     image: prom/prometheus:latest
     container_name: stremdbc-prometheus
@@ -35,15 +76,13 @@ services:
       - ./deployments/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
     restart: unless-stopped
+    profiles: ["monitoring"]
     networks:
       - stremdbc-network
-    profiles:
-      - monitoring
 
-  # Optional: Grafana for dashboards
   grafana:
     image: grafana/grafana:latest
     container_name: stremdbc-grafana
@@ -52,25 +91,24 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
     restart: unless-stopped
     depends_on:
       - prometheus
+    profiles: ["monitoring"]
     networks:
       - stremdbc-network
-    profiles:
-      - monitoring
 
 volumes:
   hls_data:
-    driver: local
+  llhls_data:
   recordings:
-    driver: local
+  dvr_data:
+  redis_data:
+  postgres_data:
   prometheus_data:
-    driver: local
   grafana_data:
-    driver: local
 
 networks:
   stremdbc-network:
