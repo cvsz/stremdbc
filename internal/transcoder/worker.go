@@ -163,7 +163,7 @@ func (w *Worker) executeJob(job *TranscodeJob) {
 	// Build FFmpeg command for ABR ladder
 	args := w.buildFFmpegArgs(job)
 
-	cmd := exec.CommandContext(w.config.Enable ? context.Background() : context.Background(), w.config.FFmpegPath, args...)
+	cmd := exec.CommandContext(context.Background(), w.config.FFmpegPath, args...)
 	w.cmd = cmd
 
 	output, err := cmd.CombinedOutput()
